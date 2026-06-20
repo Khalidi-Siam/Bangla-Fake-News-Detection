@@ -42,8 +42,8 @@ image = (
 @app.function(
     image=image,
     gpu="A100-40GB",
-    cpu=4,
-    memory=16384,
+    cpu=6,
+    memory=32768,
     volumes={"/root/datasets": volume},
     timeout=60 * 60 * 4,
     secrets=[modal.Secret.from_name("huggingface-secret")],
