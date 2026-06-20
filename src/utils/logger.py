@@ -3,11 +3,12 @@ import sys
 import io
 import logging
 from datetime import datetime
+from config.config import settings
 
 # VOLUME_PATH = "/root/datasets"
 logging_str = "[%(asctime)s: %(levelname)s: %(module)s: %(message)s]"
 # log_dir = os.path.join(VOLUME_PATH, "logs")
-log_dir = os.path.join("logs")
+log_dir = settings.logging_dir
 log_file_name = f"log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
 os.makedirs(log_dir, exist_ok=True)
 log_filepath = os.path.join(log_dir, log_file_name)

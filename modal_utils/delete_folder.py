@@ -11,7 +11,7 @@ volume = modal.Volume.from_name("datasets-volume")
     volumes={"/root/datasets": volume},
 )
 def delete_pruned_model():
-    target_path = "/root/datasets/logs"
+    target_path = "/root/datasets/Artifacts/tokenized_cache"
 
     if os.path.exists(target_path):
         print(f"🗑️ Deleting: {target_path}")
