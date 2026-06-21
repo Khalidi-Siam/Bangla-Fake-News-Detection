@@ -36,7 +36,25 @@ class BertEvaluateConfig(BaseModel):
     long_test_subset:  Path = BASE_DIR / "Artifacts" / "long_test_subset.csv"
 
 
-class MLflowConfig(BaseModel):
+class MambaTrainConfig(BaseModel):
+    """File-system paths produced / consumed by the Bangla-Mamba training."""
+    cache_dir:         Path = BASE_DIR / "Artifacts" / "tokenized_cache_mamba_768"
+    checkpoint_dir:    Path = BASE_DIR / "Artifacts" / "checkpoints" / "mamba_768"
+    best_model_dir:    Path = BASE_DIR / "Artifacts" / "best_model" / "mamba_768"
+    results_file:      Path = BASE_DIR / "Artifacts" / "logs" / "mamba_768_results.json"
+    short_test_subset: Path = BASE_DIR / "Artifacts" / "short_test_subset.csv"
+    long_test_subset:  Path = BASE_DIR / "Artifacts" / "long_test_subset.csv"
+
+
+class MambaEvaluateConfig(BaseModel):
+    """File-system paths consumed / produced by the Bangla-Mamba evaluation step."""
+    best_model_dir:    Path = BASE_DIR / "Artifacts" / "best_model" / "mamba_768"
+    results_file:      Path = BASE_DIR / "Artifacts" / "logs" / "mamba_768_results.json"
+    short_test_subset: Path = BASE_DIR / "Artifacts" / "short_test_subset.csv"
+    long_test_subset:  Path = BASE_DIR / "Artifacts" / "long_test_subset.csv"
+
+
+class BertMLflowConfig(BaseModel):
     """MLflow experiment tracking configuration.
 
     DagsHub credentials are read from environment variables:
@@ -48,6 +66,20 @@ class MLflowConfig(BaseModel):
     run_name:        str  = "banglabert_finetune"
     log_model:       bool = True   # set False to skip uploading the ~500 MB model weights
 
+
+class MambaMLflowConfig(BaseModel):
+    """MLflow experiment tracking configuration for Bangla-Mamba.
+
+    DagsHub credentials are read from environment variables:
+      MLFLOW_TRACKING_USERNAME  — your DagsHub username
+      MLFLOW_TRACKING_PASSWORD  — your DagsHub access token / password
+    """
+    tracking_uri:    str  = "https://dagshub.com/Khalidi-Siam/Bangla-Fake-News-Detection.mlflow"
+    experiment_name: str  = "Bangla-Mamba-Fake-News"
+    run_name:        str  = "mamba_train"
+    log_model:       bool = True   # set False to skip uploading the model weights
+
+
 class Settings(BaseSettings):
     seed: int = 42
     logging_dir: Path = BASE_DIR / "logs"
@@ -55,7 +87,10 @@ class Settings(BaseSettings):
     offline_tokenize: OfflineTokenizeConfig = OfflineTokenizeConfig()
     bert_finetune: BertFineTuneConfig = BertFineTuneConfig()
     bert_evaluate: BertEvaluateConfig = BertEvaluateConfig()
-    mlflow: MLflowConfig = MLflowConfig()
+    bert_mlflow: BertMLflowConfig = BertMLflowConfig()
+    mamba_train: MambaTrainConfig = MambaTrainConfig()
+    mamba_evaluate: MambaEvaluateConfig = MambaEvaluateConfig()
+    mamba_mlflow: MambaMLflowConfig = MambaMLflowConfig()
 
     model_config = SettingsConfigDict(
         env_file=".env",

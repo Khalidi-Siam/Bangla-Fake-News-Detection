@@ -2,6 +2,8 @@ from src.data_ingestion import DataIngestion
 from src.offline_tokenize import OfflineTokenize
 from src.finetune_bert import BertFineTune
 from src.evaluate_bert import BertEvaluate
+from src.ssm_train import MambaTrainer
+from src.evaluate_ssm import MambaEvaluate
 from src.utils.logger import logging
 
 # ── Data Ingestion ──
@@ -23,10 +25,10 @@ Otherwise, for different max_length you need to run this tokenizer separately fo
 
 
 # ── BanglaBERT Fine-Tuning (Steps 1–6: tokenizer load, dataset load, build, train) ──
-stage = "BanglaBERT Fine-Tuning"
-logging.info(f"Stage {stage} started")
-bert_finetuner = BertFineTune()
-bert_finetuner.initialize_bert_finetuning()   # also triggers BertEvaluate internally
+# stage = "BanglaBERT Fine-Tuning"
+# logging.info(f"Stage {stage} started")
+# bert_finetuner = BertFineTune()
+# bert_finetuner.initialize_bert_finetuning()   # also triggers BertEvaluate internally
 
 
 # ── BanglaBERT Evaluation (Steps 7–10: standalone re-evaluation on saved best model) ──
@@ -41,3 +43,25 @@ bert_finetuner.initialize_bert_finetuning()   # also triggers BertEvaluate inter
 #     training_history = [],    # optional per-epoch history
 #     best_val_f1      = 0.0,   # optional scalar
 # )
+
+
+# ── Bangla-Mamba Training (Steps 1–10: tokenizer, datasets, build, train, evaluate) ──
+stage = "Bangla-Mamba Training"
+logging.info(f"Stage {stage} started")
+mamba_trainer = MambaTrainer()
+mamba_trainer.initialize_mamba_training() # also triggers MambaEvaluate internally
+
+
+# ── Bangla-Mamba Evaluation (Steps 7–10: standalone re-evaluation on saved best model) ──
+# Useful if you want to re-run evaluation without re-training.
+# stage = "Bangla-Mamba Evaluation"
+# logging.info(f"Stage {stage} started")
+# evaluator = MambaEvaluate()
+# evaluator.initialize_mamba_evaluation(
+#     test_loader      = ...,   # pass a pre-built DataLoader
+#     tokenizer        = ...,   # pass a pre-loaded tokenizer
+#     training_config  = {},    # optional metadata dict
+#     training_history = [],    # optional per-epoch history
+#     best_val_f1      = 0.0,   # optional scalar
+# )
+

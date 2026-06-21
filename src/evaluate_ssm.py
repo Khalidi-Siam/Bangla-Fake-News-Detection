@@ -1,6 +1,6 @@
 """
 =============================================================
-BanglaBERT Evaluation — Bangla Fake News Classification
+Bangla-Mamba Evaluation — Bangla Fake News Classification
 =============================================================
 Runs post-training evaluation steps on the best saved model:
   - STEP 7 · Final Test Evaluation  (best model on full test set)
@@ -9,8 +9,8 @@ Runs post-training evaluation steps on the best saved model:
   - STEP 10 · Print Summary
 
 PRE-REQUISITE:
-  A completed fine-tuning run with a best model saved at
-  Artifacts/best_model/banglabert/
+  A completed training run with a best model saved at
+  Artifacts/best_model/mamba/
 =============================================================
 """
 
@@ -22,7 +22,6 @@ import pandas as pd
 import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
-from transformers import AutoModelForSequenceClassification
 from datasets import Dataset
 from sklearn.metrics import (
     classification_report,
@@ -40,33 +39,38 @@ from src.utils.common import create_directory, section
 from config.config import settings
 from config.params import params
 
+from src.ssm_model import BanglaMambaForClassification
 
-class BertEvaluate:
+
+class MambaEvaluate:
     """
-    Post-training evaluation pipeline for BanglaBERT.
+    Post-training evaluation pipeline for Bangla-Mamba (SSM).
 
-    Loads the best saved model from disk, runs final test-set evaluation,
+    Loads the best saved Mamba model from disk, runs final test-set evaluation,
     thesis experiment (long vs short article F1), persists JSON results,
     and prints a summary table.
 
-    Designed to be called after BertFineTune.initialize_bert_finetuning()
+    Designed to be called after MambaTrainer.initialize_mamba_training()
     has completed, or independently as a standalone evaluation run.
     """
 
     def __init__(self):
         # ── Paths (from config) ────────────────────────────────
-        self.best_model_dir  = settings.bert_evaluate.best_model_dir
-        self.results_file    = settings.bert_evaluate.results_file
-        self.short_test_path = settings.bert_evaluate.short_test_subset
-        self.long_test_path  = settings.bert_evaluate.long_test_subset
+        self.best_model_dir  = settings.mamba_evaluate.best_model_dir
+        self.results_file    = settings.mamba_evaluate.results_file
+        self.short_test_path = settings.mamba_evaluate.short_test_subset
+        self.long_test_path  = settings.mamba_evaluate.long_test_subset
 
         # ── Hyper-parameters (from params) ─────────────────────
-        self.model_name  = params.bert.model_name
-        self.num_labels  = params.bert.num_labels
-        self.max_length  = params.bert.max_length
-        self.batch_size  = params.bert.batch_size
-        self.use_bf16    = params.bert.use_bf16
-        self.num_workers = params.bert.num_workers
+        self.tokenizer_name = params.mamba.tokenizer_name
+        self.vocab_size     = params.mamba.vocab_size
+        self.d_model        = params.mamba.d_model
+        self.n_layer        = params.mamba.n_layer
+        self.num_labels     = params.mamba.num_labels
+        self.max_length     = params.mamba.max_length
+        self.batch_size     = params.mamba.batch_size
+        self.use_bf16       = params.mamba.use_bf16
+        self.num_workers    = params.mamba.num_workers
 
         # Global setting
         self.seed = settings.seed
@@ -118,7 +122,7 @@ class BertEvaluate:
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
                                 enabled=self.use_bf16):
-                outputs = self.model(
+                logits = self.model(
                     input_ids      = input_ids,
                     attention_mask = attention_mask,
                 )
@@ -129,8 +133,8 @@ class BertEvaluate:
             if profile:
                 batch_times_ms.append((time.perf_counter() - t0) * 1000)
 
-            probs = torch.softmax(outputs.logits.float(), dim=-1)[:, 1]
-            preds = outputs.logits.argmax(dim=-1)
+            probs = torch.softmax(logits.float(), dim=-1)[:, 1]
+            preds = logits.argmax(dim=-1)
 
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.numpy())
@@ -201,20 +205,19 @@ class BertEvaluate:
         Load the best saved model and evaluate it on the full test set.
 
         Args:
-            test_loader: DataLoader for the test split (built by BertFineTune).
+            test_loader: DataLoader for the test split.
 
         Returns:
             test_metrics dict with macro_f1, auc_roc, per-class P/R/F1.
         """
-        from src.utils.common import section
         section("STEP 7 · Final Test Evaluation — Best Model")
         logging.info(f"  Loading best model from {self.best_model_dir} ...")
 
         try:
-            self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model = BanglaMambaForClassification.load(
                 str(self.best_model_dir),
-                num_labels=self.num_labels,
-            ).to(self.device)
+                device=self.device,
+            )
         except Exception as e:
             raise CustomException(e, sys)
 
@@ -227,19 +230,17 @@ class BertEvaluate:
     def thesis_experiment(self, tokenizer) -> dict:
         """
         Evaluate the best model on long (>512 tokens) and short (≤512 tokens)
-        test subsets to quantify the truncation cost of BanglaBERT.
+        test subsets to compare with BanglaBERT's truncation cost.
 
         Args:
-            tokenizer: The BanglaBERT tokenizer (passed from BertFineTune).
+            tokenizer: The tokenizer (passed from MambaTrainer).
 
         Returns:
             subset_results dict keyed by subset label.
         """
-        from src.utils.common import section
         section("STEP 8 · Thesis Experiment — Long vs Short Article F1")
-        logging.info("  BanglaBERT truncates long articles (>512 tokens).")
-        logging.info("  This shows how much F1 degrades on those articles.")
-        logging.info("  Mamba-768 will be compared against these numbers.\n")
+        logging.info("  Mamba-768 is trained with max_length=768.")
+        logging.info("  This shows how much F1 changes on long vs short articles.\n")
 
         self.tokenizer = tokenizer
         subset_results = {}
@@ -309,33 +310,23 @@ class BertEvaluate:
     ):
         """
         Print thesis comparison table and persist all results to JSON.
-
-        Args:
-            test_metrics:     Metrics dict from evaluate_test().
-            subset_results:   Subset metrics dict from thesis_experiment().
-            training_config:  Config snapshot from BertFineTune (model, LR, etc.).
-            training_history: Per-epoch history list from BertFineTune.
-            best_val_f1:      Best validation Macro-F1 from BertFineTune.
         """
-        from src.utils.common import section
         section("STEP 9 · Results Summary & Save")
 
         # ── Thesis table ──────────────────────────────────────
         logging.info("\n  ┌──────────────────────────────────────────────────┐")
-        logging.info("  │  THESIS TABLE: BanglaBERT Performance by Length │")
+        logging.info("  │  THESIS TABLE: Bangla-Mamba Performance by Length│")
         logging.info("  ├──────────────────────────────────────────────────┤")
         logging.info(f"  │  {'Subset':<28} {'Macro-F1':>10} {'AUC-ROC':>10} │")
         logging.info("  ├──────────────────────────────────────────────────┤")
         logging.info(f"  │  {'Full test set':<28} "
-                     f"{test_metrics['macro_f1']:>10.4f} "
-                     f"{test_metrics['auc_roc']:>10.4f} │")
+                      f"{test_metrics['macro_f1']:>10.4f} "
+                      f"{test_metrics['auc_roc']:>10.4f} │")
         for lbl, m in subset_results.items():
             logging.info(f"  │  {lbl:<28} "
-                         f"{m['macro_f1']:>10.4f} "
-                         f"{m['auc_roc']:>10.4f} │")
+                          f"{m['macro_f1']:>10.4f} "
+                          f"{m['auc_roc']:>10.4f} │")
         logging.info("  └──────────────────────────────────────────────────┘")
-        logging.info("  NOTE: long_test F1 drop = BanglaBERT truncation cost")
-        logging.info("        Mamba-768 should close this gap.")
 
         # ── Save JSON ─────────────────────────────────────────
         create_directory(self.results_file.parent)
@@ -361,19 +352,13 @@ class BertEvaluate:
         best_val_f1: float,
     ):
         """
-        Print a final boxed summary of BanglaBERT results.
-
-        Args:
-            test_metrics:     Metrics dict from evaluate_test().
-            training_history: Per-epoch history list from BertFineTune.
-            best_val_f1:      Best validation Macro-F1 from BertFineTune.
+        Print a final boxed summary of Bangla-Mamba results.
         """
-        from src.utils.common import section
         section("Evaluation Complete ✅")
         total_train_min = sum(h.get("time_min", 0) for h in training_history)
         logging.info(f"""
   ┌──────────────────────────────────────────────────┐
-  │            BANGLABERT RESULTS SUMMARY            │
+  │            BANGLA-MAMBA RESULTS SUMMARY          │
   ├──────────────────────────────────────────────────┤
   │  Best Val  Macro-F1  : {best_val_f1:<10.4f}                │
   │  Test      Macro-F1  : {test_metrics['macro_f1']:<10.4f}                │
@@ -387,13 +372,10 @@ class BertEvaluate:
   │  Best model → {str(self.best_model_dir):<33} │
   │  Results   → {str(self.results_file):<33} │
   └──────────────────────────────────────────────────┘
-
-  NEXT: Use these numbers as the baseline target
-        when training Mamba-768.
 """)
 
     # ──────────────────────────────────────────────────────────
-    # MLflow logging (called inside the active run from finetune_bert)
+    # MLflow logging
     # ──────────────────────────────────────────────────────────
     def _log_to_mlflow(
         self,
@@ -403,14 +385,6 @@ class BertEvaluate:
     ):
         """
         Log final evaluation artefacts to the currently active MLflow run.
-
-        Operates inside the run opened by BertFineTune.initialize_bert_finetuning().
-        Three things are logged:
-          1. Scalar metrics  — test set + thesis experiment subsets.
-          2. Results JSON    — logged as an MLflow artifact file.
-          3. Best model      — reloaded from disk (self.model) then logged via
-                               mlflow.transformers.log_model, guaranteeing
-                               exactly the saved weights are stored in MLflow.
         """
         if not mlflow.active_run():
             logging.warning("  ⚠️  No active MLflow run — skipping MLflow logging.")
@@ -448,7 +422,7 @@ class BertEvaluate:
             mlflow.log_metrics({
                 f"eval_profile/{k}": v
                 for k, v in self.eval_profiling.items()
-                if isinstance(v, (int, float))   # guard against any str values
+                if isinstance(v, (int, float))
             })
             logging.info("  ✓ Profiling metrics logged to MLflow")
 
@@ -457,17 +431,9 @@ class BertEvaluate:
             mlflow.log_artifact(str(self.results_file), artifact_path="results")
             logging.info(f"  ✓ Results JSON logged  → results/{self.results_file.name}")
 
-        # ── 4. Best model (upload saved HF directory as MLflow artifacts) ──
-        #
-        # The best model is already saved to disk in HuggingFace format by
-        # BertFineTune._save_best_model().  We use mlflow.log_artifacts() to
-        # upload the directory directly — no re-serialisation, no dependency
-        # scan, and no torchvision false-positive import errors.
-        # Files (config.json, model.safetensors, tokenizer files, etc.) can
-        # be reloaded later with:
-        #   AutoModelForSequenceClassification.from_pretrained("<run>/best_model")
-        if settings.bert_mlflow.log_model and self.best_model_dir.exists():
-            logging.info("  📦 Logging best model to MLflow (HuggingFace files) ...")
+        # ── 4. Best model ──
+        if settings.mamba_mlflow.log_model and self.best_model_dir.exists():
+            logging.info("  📦 Logging best model to MLflow (Mamba files) ...")
             try:
                 mlflow.log_artifacts(
                     str(self.best_model_dir),
@@ -475,15 +441,14 @@ class BertEvaluate:
                 )
                 logging.info("  ✓ Best model logged to MLflow under 'best_model/'")
             except Exception as e:
-                # Non-fatal: log a warning but don't crash the pipeline
                 logging.warning(f"  ⚠️  mlflow.log_artifacts (best_model) failed: {e}")
-        elif not settings.bert_mlflow.log_model:
+        elif not settings.mamba_mlflow.log_model:
             logging.info("  ⏩ Model upload skipped (mlflow.log_model=False)")
 
     # ──────────────────────────────────────────────────────────
     # PUBLIC: run full evaluation pipeline
     # ──────────────────────────────────────────────────────────
-    def initialize_bert_evaluation(
+    def initialize_mamba_evaluation(
         self,
         test_loader: DataLoader,
         tokenizer,
@@ -492,14 +457,14 @@ class BertEvaluate:
         best_val_f1: float,
     ):
         """
-        Execute the full BanglaBERT evaluation pipeline end-to-end.
+        Execute the full Bangla-Mamba evaluation pipeline end-to-end.
 
         Args:
-            test_loader:      DataLoader for the test split (from BertFineTune).
-            tokenizer:        BanglaBERT tokenizer (from BertFineTune).
-            training_config:  Config snapshot dict (from BertFineTune).
-            training_history: Per-epoch history list (from BertFineTune).
-            best_val_f1:      Best validation Macro-F1 (from BertFineTune).
+            test_loader:      DataLoader for the test split (from MambaTrainer).
+            tokenizer:        Tokenizer (from MambaTrainer).
+            training_config:  Config snapshot dict (from MambaTrainer).
+            training_history: Per-epoch history list (from MambaTrainer).
+            best_val_f1:      Best validation Macro-F1 (from MambaTrainer).
         """
         test_metrics   = self.evaluate_test(test_loader)
         subset_results = self.thesis_experiment(tokenizer)
@@ -511,9 +476,4 @@ class BertEvaluate:
             best_val_f1,
         )
         self.print_summary(test_metrics, training_history, best_val_f1)
-
-        # ── MLflow: log metrics + artifacts + best model ──────────────
-        # Runs inside the active MLflow run opened by BertFineTune.
-        # self.model is already the best model reloaded from disk;
-        # self.tokenizer is set by thesis_experiment() above.
         self._log_to_mlflow(test_metrics, subset_results, best_val_f1)

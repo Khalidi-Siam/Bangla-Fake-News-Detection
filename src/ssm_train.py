@@ -1,32 +1,31 @@
 """
 =============================================================
-BanglaBERT Fine-Tuning — Bangla Fake News Classification
-Baseline Model for Mamba Comparison
+ssm_train.py — Bangla-Mamba Training Pipeline (Steps 1–6)
 Optimized for: NVIDIA A100 40GB
 =============================================================
 Features:
-  - BF16 mixed precision  (native A100 tensor cores)
-  - Larger batch size     (32 × 2 accum = 64 effective)
-  - Auto-resume from latest checkpoint if training interrupted
+  - Loads pre-tokenized 768-token cache from preprocessing
+  - BF16 mixed precision (A100 native tensor cores)
+  - AdamW + OneCycleLR with warmup
+  - Weighted CrossEntropyLoss for 83.5/16.5 imbalance
+  - Auto-resume from latest checkpoint if interrupted
   - Saves checkpoint after every epoch (keeps latest 2)
-  - Tracks & saves best model by Macro-F1 on validation set
-  - Weighted loss for class imbalance (83.5% / 16.5%)
-  - MLflow tracking (DagsHub) — one run covers train + eval
+  - Best model saved by Val Macro-F1
+  - MLflow tracking (DagsHub) — one run spans train + eval
 =============================================================
 Expected runtime on A100-40GB:
-  ~3 min/epoch  →  ~15 min total (5 epochs, BF16, batch=32)
+  ~6–10 min/epoch  →  ~35–55 min total (5 epochs, BF16)
 =============================================================
 PRE-REQUISITE:
-  tokenized cache at Artifacts/tokenized_cache_bert/
+  tokenized cache at Artifacts/tokenized_cache_mamba/
   This class loads that cache directly — no tokenization here.
 
-NOTE: Evaluation logic (Steps 7–10) lives in src/evaluate_bert.py.
-============================================================="""
+NOTE: Evaluation logic (Steps 7–10) lives in src/evaluate_ssm.py.
+=============================================================
+"""
 
-import os
 import sys
 import json
-import glob
 import time
 import shutil
 import numpy as np
@@ -36,76 +35,85 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-)
+from transformers import AutoTokenizer
 from datasets import load_from_disk
+from sklearn.metrics import (
+    classification_report,
+    f1_score,
+    roc_auc_score,
+    precision_recall_fscore_support,
+)
 import mlflow
 import warnings
 warnings.filterwarnings("ignore")
 
+# Import our model
+from src.ssm_model import build_bangla_mamba, BanglaMambaForClassification
 from src.utils.logger import logging
 from src.utils.exception import CustomException
-from src.utils.common import save_json, load_json, section, create_directory
-from src.evaluate_bert import BertEvaluate
+from src.utils.common import section, create_directory
+from src.evaluate_ssm import MambaEvaluate
 from config.config import settings
 from config.params import params
 
 
-class BertFineTune:
+class MambaTrainer:
     """
-    BanglaBERT Fine-Tuning pipeline for Bangla Fake News Classification.
+    Bangla-Mamba (SSM) training pipeline for Bangla Fake News Classification.
 
-    Loads pre-tokenized HuggingFace datasets from disk, builds the model,
-    trains with BF16 + OneCycleLR, saves checkpoints every epoch, and
-    tracks the best val Macro-F1.
+    Loads pre-tokenized HuggingFace datasets from disk, builds the Mamba model
+    from scratch, trains with BF16 + OneCycleLR, saves checkpoints every epoch,
+    and tracks the best val Macro-F1.
 
-    A single MLflow run is opened in initialize_bert_finetuning() and spans
-    both training (Steps 1–6) and evaluation (Steps 7–10, via BertEvaluate).
+    A single MLflow run is opened in initialize_mamba_training() and spans
+    both training (Steps 1–6) and evaluation (Steps 7–10, via MambaEvaluate).
     DagsHub credentials are read from env vars:
       MLFLOW_TRACKING_USERNAME / MLFLOW_TRACKING_PASSWORD
+
+    Paths are read from config.settings.mamba_train.
+    Hyper-parameters are read from config.params.mamba.
     """
 
     def __init__(self):
         # ── Paths (from config) ────────────────────────────────
-        self.bert_cache_dir   = settings.bert_finetune.bert_cache_dir
-        self.checkpoint_dir   = settings.bert_finetune.checkpoint_dir
-        self.best_model_dir   = settings.bert_finetune.best_model_dir
-        self.results_file     = settings.bert_finetune.results_file
-        self.short_test_path  = settings.bert_finetune.short_test_subset
-        self.long_test_path   = settings.bert_finetune.long_test_subset
+        self.cache_dir      = settings.mamba_train.cache_dir
+        self.checkpoint_dir = settings.mamba_train.checkpoint_dir
+        self.best_model_dir = settings.mamba_train.best_model_dir
+        self.results_file   = settings.mamba_train.results_file
 
         # ── Hyper-parameters (from params) ─────────────────────
-        self.model_name    = params.bert.model_name
-        self.num_labels    = params.bert.num_labels
-        self.max_length    = params.bert.max_length
-        self.epochs        = params.bert.epochs
-        self.batch_size    = params.bert.batch_size
-        self.grad_accum    = params.bert.grad_accum
-        self.learning_rate = params.bert.learning_rate
-        self.weight_decay  = params.bert.weight_decay
-        self.warmup_pct    = params.bert.warmup_pct
-        self.max_grad_norm = params.bert.max_grad_norm
-        self.use_bf16      = params.bert.use_bf16
-        self.class_weights = params.bert.class_weights
-        self.num_workers   = params.bert.num_workers
+        self.tokenizer_name = params.mamba.tokenizer_name
+        self.vocab_size     = params.mamba.vocab_size
+        self.d_model        = params.mamba.d_model
+        self.n_layer        = params.mamba.n_layer
+        self.num_labels     = params.mamba.num_labels
+        self.max_length     = params.mamba.max_length
+        self.epochs         = params.mamba.epochs
+        self.batch_size     = params.mamba.batch_size
+        self.grad_accum     = params.mamba.grad_accum
+        self.learning_rate  = params.mamba.learning_rate
+        self.weight_decay   = params.mamba.weight_decay
+        self.warmup_pct     = params.mamba.warmup_pct
+        self.max_grad_norm  = params.mamba.max_grad_norm
+        self.use_bf16       = params.mamba.use_bf16
+        self.class_weights  = params.mamba.class_weights
+        self.num_workers    = params.mamba.num_workers
 
         # Global setting
-        self.seed          = settings.seed
+        self.seed = settings.seed
 
         # ── Runtime state ──────────────────────────────────────
-        self.device        = "cuda" if torch.cuda.is_available() else "cpu"
-        self.tokenizer     = None
-        self.model         = None
-        self.optimizer     = None
-        self.scheduler     = None
-        self.criterion     = None
-        self.train_loader  = None
-        self.val_loader    = None
-        self.test_loader   = None
-        self.best_f1       = 0.0
-        self.history       = []
+        self.device       = "cuda" if torch.cuda.is_available() else "cpu"
+        self.tokenizer    = None
+        self.model        = None
+        self.optimizer    = None
+        self.scheduler    = None
+        self.criterion    = None
+        self.train_loader = None
+        self.val_loader   = None
+        self.test_loader  = None
+        self.best_f1      = 0.0
+        self.history      = []
 
     # ──────────────────────────────────────────────────────────
     # UTILITIES — Seed / device
@@ -138,6 +146,7 @@ class BertFineTune:
         logging.info(f"  Precision    : {'BF16' if self.use_bf16 else 'FP32'}")
         logging.info(f"  Batch size   : {self.batch_size} × {self.grad_accum} accum "
                      f"= {self.batch_size * self.grad_accum} effective")
+        logging.info(f"  Max length   : {self.max_length} tokens")
         logging.info(f"  Epochs       : {self.epochs}")
         logging.info(f"  LR           : {self.learning_rate}")
 
@@ -146,19 +155,18 @@ class BertFineTune:
     # ──────────────────────────────────────────────────────────
     def _save_checkpoint(self, epoch: int):
         """
-        Save full training state after each epoch.
+        Save full training state after each completed epoch.
         Keeps only the 2 most recent checkpoints to save disk space.
-        BF16 mode: no scaler state to save.
         """
         try:
             create_directory(self.checkpoint_dir)
             path = self.checkpoint_dir / f"epoch_{epoch:02d}"
             create_directory(path)
 
-            # Model weights + config (HuggingFace format)
-            self.model.save_pretrained(path)
+            # Model weights + mamba config
+            self.model.save(str(path))
 
-            # Optimizer, scheduler, metadata
+            # Optimizer + scheduler + metadata
             torch.save(
                 {
                     "epoch"     : epoch,
@@ -185,8 +193,10 @@ class BertFineTune:
         ckpts = sorted(self.checkpoint_dir.glob("epoch_*")) \
             if self.checkpoint_dir.exists() else []
         for ckpt in reversed(ckpts):
-            if (ckpt / "training_state.pt").exists() and \
-               (ckpt / "config.json").exists():
+            has_weights = (ckpt / "model_weights.pt").exists()
+            has_config  = (ckpt / "mamba_config.json").exists()
+            has_state   = (ckpt / "training_state.pt").exists()
+            if has_weights and has_config and has_state:
                 return ckpt
         return None
 
@@ -213,58 +223,61 @@ class BertFineTune:
         return state["epoch"]
 
     def _save_best_model(self, metrics: dict):
-        """Save best model weights, tokenizer config, and its metrics."""
+        """Save best model weights + config + tokenizer + metrics."""
         try:
             create_directory(self.best_model_dir)
-            self.model.save_pretrained(self.best_model_dir)
-            self.tokenizer.save_pretrained(self.best_model_dir)
+            self.model.save(str(self.best_model_dir))
+            self.tokenizer.save_pretrained(str(self.best_model_dir))
             with open(self.best_model_dir / "best_metrics.json", "w") as f:
                 json.dump(metrics, f, indent=2)
         except Exception as e:
             raise CustomException(e, sys)
 
-        logging.info(f"  🏆 Best model saved  → {self.best_model_dir}")
+        logging.info(f"  🏆 Best model & tokenizer saved  → {self.best_model_dir}")
         logging.info(f"     Macro-F1 = {metrics['macro_f1']:.4f}  |  "
-                     f"AUC-ROC = {metrics['auc_roc']:.4f}")
+                     f"AUC-ROC  = {metrics['auc_roc']:.4f}")
 
     # ──────────────────────────────────────────────────────────
     # STEP 1 — LOAD TOKENIZER
     # ──────────────────────────────────────────────────────────
     def load_tokenizer(self):
-        """Load BanglaBERT tokenizer (only used for saving best model config)."""
+        """Load BanglaBERT tokenizer (vocab reference + subset eval)."""
         section("STEP 1 · Loading Tokenizer")
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
         except Exception as e:
             raise CustomException(e, sys)
 
-        logging.info(f"  Loaded : {self.model_name}  (used for saving best model config)")
-        logging.info(f"  Vocab  : {self.tokenizer.vocab_size:,}")
+        # Override vocab_size with actual tokenizer value
+        self.vocab_size = self.tokenizer.vocab_size
+        logging.info(f"  Loaded : {self.tokenizer_name}  (used for saving best model config)")
+        logging.info(f"  Vocab  : {self.vocab_size:,}")
 
     # ──────────────────────────────────────────────────────────
     # STEP 2 — LOAD PRE-TOKENIZED DATASETS
     # ──────────────────────────────────────────────────────────
-    def load_datasets(self):
+    def load_datasets(self) -> int:
         """
         Load the pre-tokenized HuggingFace datasets from disk.
-        Requires bert_preprocess (OfflineTokenize with max_length=512) to
-        have been run first.
+        Requires OfflineTokenize (max_length=mamba.max_length) to have run first.
+        Returns total_steps for the OneCycleLR scheduler.
         """
         section("STEP 2 · Loading Pre-Tokenized Datasets")
         for split in ["train", "val", "test"]:
-            split_path = self.bert_cache_dir / split
+            split_path = self.cache_dir / split
             if not split_path.exists():
                 raise CustomException(
                     FileNotFoundError(
                         f"Pre-tokenized cache not found at '{split_path}'.\n"
-                        "Run OfflineTokenize (max_length=512) first to generate the cache."
+                        "Run OfflineTokenize (max_length=768) first to generate the cache."
                     ),
                     sys,
                 )
+
         try:
-            train_ds = load_from_disk(str(self.bert_cache_dir / "train"))
-            val_ds   = load_from_disk(str(self.bert_cache_dir / "val"))
-            test_ds  = load_from_disk(str(self.bert_cache_dir / "test"))
+            train_ds = load_from_disk(str(self.cache_dir / "train"))
+            val_ds   = load_from_disk(str(self.cache_dir / "val"))
+            test_ds  = load_from_disk(str(self.cache_dir / "test"))
         except Exception as e:
             raise CustomException(e, sys)
 
@@ -277,7 +290,6 @@ class BertFineTune:
         test_ds.set_format( type="torch", columns=fmt_cols)
 
         # ── DataLoaders ──────────────────────────────────────
-        # pin_memory=True + num_workers maximises A100 GPU feed rate
         self.train_loader = DataLoader(
             train_ds,
             batch_size  = self.batch_size,
@@ -309,54 +321,56 @@ class BertFineTune:
     # ──────────────────────────────────────────────────────────
     # STEP 3 — BUILD MODEL + OPTIMIZER + SCHEDULER
     # ──────────────────────────────────────────────────────────
-    def build_model(self, total_steps: int):
+    def build_model(self, total_steps: int) -> int:
         """
         Build or resume model, optimizer, loss, and OneCycleLR scheduler.
         Resumes from the latest checkpoint if one is found.
+        Returns start_epoch.
         """
-        section("STEP 3 · Building Model")
+        section("STEP 3 · Building Bangla-Mamba Model")
         checkpoint_path = self._find_latest_checkpoint()
 
         try:
             if checkpoint_path:
                 logging.info(f"  ♻️  Checkpoint found → {checkpoint_path}")
-                logging.info("  Loading model weights from checkpoint...")
-                self.model = AutoModelForSequenceClassification.from_pretrained(
-                    str(checkpoint_path),
-                    num_labels              = self.num_labels,
-                    ignore_mismatched_sizes = True,
+                logging.info("  Loading Mamba weights from checkpoint...")
+                self.model = BanglaMambaForClassification.load(
+                    str(checkpoint_path), device=self.device
                 )
             else:
-                logging.info(f"  No checkpoint — loading pretrained {self.model_name}")
-                self.model = AutoModelForSequenceClassification.from_pretrained(
-                    self.model_name,
-                    num_labels = self.num_labels,
+                logging.info("  No checkpoint — building fresh Mamba model")
+                self.model = build_bangla_mamba(
+                    vocab_size=self.vocab_size,
+                    d_model=self.d_model,
+                    n_layer=self.n_layer,
+                    num_labels=self.num_labels,
                 )
+                self.model = self.model.to(self.device)
         except Exception as e:
             raise CustomException(e, sys)
 
-        self.model = self.model.to(self.device)
-
-        total_params     = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters()
-                               if p.requires_grad)
-        logging.info(f"  Total params    : {total_params / 1e6:.1f}M")
-        logging.info(f"  Trainable params: {trainable_params / 1e6:.1f}M")
+        model_params = self.model.count_parameters()
+        logging.info(f"  Backbone params : {model_params['backbone_M']}M")
+        logging.info(f"  Head params     : {model_params['head_M']}M")
+        logging.info(f"  Total params    : {model_params['total_M']}M")
 
         # ── Weighted loss ─────────────────────────────────────
         weight_tensor  = torch.tensor(
             self.class_weights, dtype=torch.float32
         ).to(self.device)
         self.criterion = nn.CrossEntropyLoss(weight=weight_tensor)
-        logging.info(f"  Loss weights → Fake={self.class_weights[0]:.4f}, "
+        logging.info(f"  Loss weights → Fake={self.class_weights[0]:.4f}  "
                      f"Real={self.class_weights[1]:.4f}")
 
         # ── Optimizer ─────────────────────────────────────────
+        # Mamba trains from scratch → higher LR (1e-3) vs BERT fine-tune (2e-5)
+        # betas=(0.9, 0.95) slightly better for SSMs
         self.optimizer = AdamW(
             self.model.parameters(),
             lr           = self.learning_rate,
             weight_decay = self.weight_decay,
             eps          = 1e-8,
+            betas        = (0.9, 0.95),
         )
 
         # ── OneCycleLR scheduler ──────────────────────────────
@@ -398,15 +412,13 @@ class BertFineTune:
             attention_mask = batch["attention_mask"].to(self.device)
             labels         = batch["label"].to(self.device)
 
-            # BF16 forward pass — no GradScaler needed on A100
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+            # BF16 forward — no GradScaler needed on A100
+            with torch.autocast(device_type="cuda",
+                                dtype=torch.bfloat16,
                                 enabled=self.use_bf16):
-                outputs = self.model(
-                    input_ids      = input_ids,
-                    attention_mask = attention_mask,
-                )
-                loss = self.criterion(outputs.logits, labels)
-                loss = loss / self.grad_accum
+                logits = self.model(input_ids, attention_mask)
+                loss   = self.criterion(logits, labels)
+                loss   = loss / self.grad_accum
 
             loss.backward()
 
@@ -419,19 +431,20 @@ class BertFineTune:
                 self.optimizer.zero_grad()
 
             total_loss += loss.item() * self.grad_accum
-            preds       = outputs.logits.argmax(dim=-1)
+            preds       = logits.argmax(dim=-1)
             correct    += (preds == labels).sum().item()
             total      += labels.size(0)
             steps      += 1
 
-            # Progress log every 100 steps
-            if (step + 1) % 100 == 0:
+            # Progress log every 50 steps
+            if (step + 1) % 50 == 0:
                 avg_loss = total_loss / steps
                 acc      = correct / total * 100
                 lr_now   = self.scheduler.get_last_lr()[0]
-                logging.info(f"  Epoch {epoch} | Step {step+1:4d}/{len(self.train_loader)} | "
-                             f"Loss={avg_loss:.4f} | Acc={acc:.1f}% | "
-                             f"LR={lr_now:.2e}")
+                logging.info(
+                    f"  Epoch {epoch} | Step {step+1:4d}/{len(self.train_loader)} | "
+                    f"Loss={avg_loss:.4f} | Acc={acc:.1f}% | LR={lr_now:.2e}"
+                )
 
         # Handle leftover steps if dataset not divisible by grad_accum
         if len(self.train_loader) % self.grad_accum != 0:
@@ -452,12 +465,8 @@ class BertFineTune:
         """
         Lightweight validation evaluation used inside the training loop.
         Full test-set evaluation and thesis experiment are handled by
-        BertEvaluate (src/evaluate_bert.py).
+        MambaEvaluate (src/evaluate_ssm.py).
         """
-        from sklearn.metrics import (
-            f1_score, roc_auc_score, precision_recall_fscore_support,
-            classification_report,
-        )
         self.model.eval()
         all_preds, all_labels, all_probs = [], [], []
 
@@ -466,15 +475,13 @@ class BertFineTune:
             attention_mask = batch["attention_mask"].to(self.device)
             labels         = batch["label"]
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+            with torch.autocast(device_type="cuda",
+                                dtype=torch.bfloat16,
                                 enabled=self.use_bf16):
-                outputs = self.model(
-                    input_ids      = input_ids,
-                    attention_mask = attention_mask,
-                )
+                logits = self.model(input_ids, attention_mask)
 
-            probs = torch.softmax(outputs.logits.float(), dim=-1)[:, 1]
-            preds = outputs.logits.argmax(dim=-1)
+            probs = torch.softmax(logits.float(), dim=-1)[:, 1]
+            preds = logits.argmax(dim=-1)
 
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.numpy())
@@ -572,36 +579,40 @@ class BertFineTune:
                 logging.info(f"  No improvement. Best = {self.best_f1:.4f}")
 
     # ──────────────────────────────────────────────────────────
-    # PUBLIC: run full fine-tuning pipeline
+    # PUBLIC: run full Mamba training pipeline
     # ──────────────────────────────────────────────────────────
-    def initialize_bert_finetuning(self):
-        """Execute the BanglaBERT fine-tuning pipeline (Steps 1–6).
+    def initialize_mamba_training(self):
+        """
+        Execute the Bangla-Mamba training pipeline end-to-end (Steps 1–10).
 
         Opens a single MLflow run that spans both training and evaluation.
-        After training completes, hands off to BertEvaluate for
+        After training completes, hands off to MambaEvaluate for
         Steps 7–10 (test evaluation, thesis experiment, results & summary).
 
         DagsHub credentials are read from env vars:
           MLFLOW_TRACKING_USERNAME — DagsHub username
           MLFLOW_TRACKING_PASSWORD — DagsHub access token / password
         """
-        section("BanglaBERT Fine-Tuning — A100 40GB")
+        section("Bangla-Mamba Training — A100 40GB")
 
         self._set_seed()
         self._configure_device()
 
         # ── MLflow experiment setup ────────────────────────────
-        mlflow.set_tracking_uri(settings.bert_mlflow.tracking_uri)
-        mlflow.set_experiment(settings.bert_mlflow.experiment_name)
-        logging.info(f"  MLflow tracking URI : {settings.bert_mlflow.tracking_uri}")
-        logging.info(f"  MLflow experiment   : {settings.bert_mlflow.experiment_name}")
+        mlflow.set_tracking_uri(settings.mamba_mlflow.tracking_uri)
+        mlflow.set_experiment(settings.mamba_mlflow.experiment_name)
+        logging.info(f"  MLflow tracking URI : {settings.mamba_mlflow.tracking_uri}")
+        logging.info(f"  MLflow experiment   : {settings.mamba_mlflow.experiment_name}")
 
-        with mlflow.start_run(run_name=settings.bert_mlflow.run_name) as _run:
+        with mlflow.start_run(run_name=settings.mamba_mlflow.run_name) as _run:
             logging.info(f"  MLflow run ID       : {_run.info.run_id}")
 
             # ── Log all hyper-parameters at run start ──────────
             mlflow.log_params({
-                "model_name"        : self.model_name,
+                "tokenizer_name"    : self.tokenizer_name,
+                "vocab_size"        : self.vocab_size,
+                "d_model"           : self.d_model,
+                "n_layer"           : self.n_layer,
                 "num_labels"        : self.num_labels,
                 "max_length"        : self.max_length,
                 "epochs"            : self.epochs,
@@ -615,11 +626,12 @@ class BertFineTune:
                 "use_bf16"          : self.use_bf16,
                 "class_weight_fake" : self.class_weights[0],
                 "class_weight_real" : self.class_weights[1],
+                "optimizer_betas"   : "[0.9, 0.95]",
                 "seed"              : self.seed,
             })
             mlflow.set_tags({
                 "device"    : self.device,
-                "framework" : "huggingface-transformers",
+                "framework" : "mamba-ssm",
                 "task"      : "text-classification",
                 "language"  : "bengali",
             })
@@ -631,7 +643,10 @@ class BertFineTune:
 
             # ── Build training config snapshot for the evaluator ──
             training_config = {
-                "model"          : self.model_name,
+                "model"          : "BanglaMamba-43M",
+                "d_model"        : self.d_model,
+                "n_layer"        : self.n_layer,
+                "vocab_size"     : self.vocab_size,
                 "max_length"     : self.max_length,
                 "epochs"         : self.epochs,
                 "batch_size"     : self.batch_size,
@@ -640,13 +655,14 @@ class BertFineTune:
                 "lr"             : self.learning_rate,
                 "precision"      : "BF16" if self.use_bf16 else "FP32",
                 "class_weights"  : self.class_weights,
+                "optimizer_betas": [0.9, 0.95],
             }
 
-            # ── Delegate evaluation (Steps 7–10) to BertEvaluate ──
-            # BertEvaluate runs inside this same active MLflow run;
+            # ── Delegate evaluation (Steps 7–10) to MambaEvaluate ──
+            # MambaEvaluate runs inside this same active MLflow run;
             # it logs final test metrics, results JSON, and the best model.
-            evaluator = BertEvaluate()
-            evaluator.initialize_bert_evaluation(
+            evaluator = MambaEvaluate()
+            evaluator.initialize_mamba_evaluation(
                 test_loader      = self.test_loader,
                 tokenizer        = self.tokenizer,
                 training_config  = training_config,
