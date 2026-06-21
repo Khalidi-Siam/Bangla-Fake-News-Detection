@@ -1,0 +1,29 @@
+# ── Version control ─────────────────────────────────────────────────────────────
+.git
+.gitignore
+
+# ── Secrets – never bake into the image; pass via --env-file at runtime ─────────
+.env
+
+# ── Python artefacts ────────────────────────────────────────────────────────────
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+
+
+# ── Notebook / IDE ───────────────────────────────────────────────────────────────
+.ipynb_checkpoints
+*.ipynb
+.vscode
+.idea
+
+# ── OS noise ─────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+
+*.log
+modal_utils
+temp/
+env/

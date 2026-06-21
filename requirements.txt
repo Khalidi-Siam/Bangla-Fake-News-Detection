@@ -2,11 +2,11 @@ pandas
 numpy
 scikit-learn
 matplotlib
-torch==2.4.0
+torch==2.4.0 --index-url https://download.pytorch.org/whl/cpu #install appropriate gpu version, if you have gpu
 transformers==4.40.0
 datasets
 mlflow
 pydantic-settings
 streamlit
-# causal-conv1d==1.4.0
-# mamba-ssm==2.2.2
+# causal-conv1d==1.4.0 # only install if you have gpu
+# mamba-ssm==2.2.2 # only install if you have gpu
