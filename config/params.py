@@ -67,7 +67,7 @@ class MambaTrainParams(BaseModel):
     max_length: int         = 768     # Mamba context window (vs BERT 512)
 
     # ── Training ───────────────────────────────────────────────
-    epochs: int             = 1
+    epochs: int             = 5
     batch_size: int         = 32       # Mamba at 768 tokens is more memory-hungry
                                       # than BERT at 512. 8 is safe on A100-40GB.
     grad_accum: int         = 2       # effective batch = 8 × 8 = 64 (same as BERT)
