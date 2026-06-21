@@ -33,9 +33,9 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # ── Project root on sys.path ──────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# if str(PROJECT_ROOT) not in sys.path:
+#     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.config import settings
 from config.params import params
@@ -189,13 +189,13 @@ class BertPredictor:
     """
     Loads the best BanglaBERT model from
     Artifacts/best_model/banglabert/ and predicts on a single text.
-    Works on both CPU and GPU.
+    Works on CPU.
     """
 
-    def __init__(self, device: str | None = None):
+    def __init__(self, device: str = "cpu"):
         self.best_model_dir = settings.bert_finetune.best_model_dir
         self.max_length     = params.bert.max_length
-        self.device         = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device         = "cpu"
         self.tokenizer      = None
         self.model          = None
 
@@ -206,13 +206,11 @@ class BertPredictor:
                 f"BanglaBERT best model not found at '{self.best_model_dir}'.\n"
                 "Run the fine-tuning pipeline first (finetune_bert.py)."
             )
-        print(f"[BanglaBERT] Loading from : {self.best_model_dir}")
         self.tokenizer = AutoTokenizer.from_pretrained(str(self.best_model_dir))
         self.model     = AutoModelForSequenceClassification.from_pretrained(
             str(self.best_model_dir)
         )
         self.model.to(self.device).eval()
-        print(f"[BanglaBERT] Loaded on    : {self.device}")
 
     @torch.no_grad()
     def predict(self, text: str) -> dict:
@@ -246,68 +244,22 @@ class BertPredictor:
 # =============================================================
 class MambaPredictor:
     """
-    Smart Mamba predictor:
-
-      • If CUDA is available → uses mamba-ssm (original trained weights)
-            model dir : Artifacts/best_model/mamba_768/
-
-      • If CPU only          → uses HuggingFace MambaModel (pure PyTorch)
-            model dir : Artifacts/best_model/mamba_768_hf/
-            (must run modal_utils/convert_mamba_to_hf.py first)
-
-    The backend is chosen automatically unless you pass `force_backend`.
+    Smart Mamba predictor for CPU (HF MambaModel).
+    Loads from: Artifacts/best_model/mamba_768_hf/
     """
 
     # Paths
-    GPU_MODEL_DIR = settings.mamba_train.best_model_dir               # mamba-ssm weights
     CPU_MODEL_DIR = settings.mamba_train.best_model_dir.parent / "mamba_768_hf"  # HF weights
 
-    def __init__(
-        self,
-        device        : str | None = None,
-        force_backend : str | None = None,   # "gpu" | "cpu" | None (auto)
-    ):
+    def __init__(self, device: str = "cpu"):
         self.max_length = params.mamba.max_length
-        self.device     = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device     = "cpu"
         self.tokenizer  = None
         self.model      = None
-
-        # Decide backend
-        cuda_available = torch.cuda.is_available()
-        if force_backend == "cpu":
-            self._backend = "hf_cpu"
-        elif force_backend == "gpu":
-            self._backend = "mamba_ssm"
-        elif cuda_available:
-            self._backend = "mamba_ssm"
-        else:
-            self._backend = "hf_cpu"
+        self._backend   = "hf_cpu"
 
     def load(self):
-        if self._backend == "mamba_ssm":
-            self._load_mamba_ssm()
-        else:
-            self._load_hf_cpu()
-
-    # ── GPU backend ───────────────────────────────────────────
-    def _load_mamba_ssm(self):
-        """Load original mamba-ssm weights (requires CUDA)."""
-        # Import here so CPU users never trigger a CUDA error
-        from src.ssm_model import BanglaMambaForClassification
-
-        model_dir = self.GPU_MODEL_DIR
-        if not model_dir.exists():
-            raise FileNotFoundError(
-                f"[Mamba-SSM] Model not found at '{model_dir}'.\n"
-                "Run the Mamba training pipeline first (ssm_train.py)."
-            )
-        print(f"[Bangla-Mamba / mamba-ssm] Loading from : {model_dir}")
-        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
-        self.model     = BanglaMambaForClassification.load(
-            str(model_dir), device=self.device
-        )
-        self.model.eval()
-        print(f"[Bangla-Mamba / mamba-ssm] Loaded on    : {self.device}")
+        self._load_hf_cpu()
 
     # ── CPU backend ───────────────────────────────────────────
     def _load_hf_cpu(self):
@@ -320,14 +272,11 @@ class MambaPredictor:
                 "    modal run modal_utils/convert_mamba_to_hf.py\n"
                 "Then download the folder to Artifacts/best_model/mamba_768_hf/"
             )
-        print(f"[Bangla-Mamba / HF-CPU] Loading from : {model_dir}")
         self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
         self.model     = BanglaMambaHFForClassification.load(
             str(model_dir), device=self.device
         )
         self.model.eval()
-        print(f"[Bangla-Mamba / HF-CPU] Loaded on    : {self.device}")
-        print(f"[Bangla-Mamba / HF-CPU] ⚠️  CPU inference — may be slow for long texts.")
 
     # ── Inference ─────────────────────────────────────────────
     @torch.no_grad()
@@ -358,9 +307,7 @@ class MambaPredictor:
 
     @property
     def backend_name(self) -> str:
-        return "Bangla-Mamba (mamba-ssm / GPU)" \
-            if self._backend == "mamba_ssm" \
-            else "Bangla-Mamba (HuggingFace / CPU)"
+        return "Bangla-Mamba (HuggingFace / CPU)"
 
 
 # =============================================================
@@ -370,7 +317,7 @@ def predict_news(
     title        : str,
     body         : str,
     model_choice : str       = "bert",   # "bert" or "mamba"
-    device       : str | None = None,
+    device       : str       = "cpu",
 ) -> dict:
     """
     End-to-end prediction: preprocess → load model → predict.
@@ -378,9 +325,9 @@ def predict_news(
     Args:
         title        : News headline / title.
         body         : News body / content.
-        model_choice : "bert"  → BanglaBERT  (CPU/GPU)
-                       "mamba" → Bangla-Mamba (auto: GPU=mamba-ssm, CPU=HF)
-        device       : "cuda" / "cpu" (auto-detects if None).
+        model_choice : "bert"  → BanglaBERT  (CPU)
+                       "mamba" → Bangla-Mamba (CPU)
+        device       : Ignored (always runs on CPU).
 
     Returns:
         dict with keys:
@@ -398,10 +345,10 @@ def predict_news(
 
     # ── 2. Load predictor ─────────────────────────────────────
     if model_choice == "bert":
-        predictor = BertPredictor(device=device)
+        predictor = BertPredictor(device="cpu")
         backend   = "BanglaBERT (HuggingFace)"
     else:
-        predictor = MambaPredictor(device=device)
+        predictor = MambaPredictor(device="cpu")
         predictor.load()              # load first to resolve backend name
         backend = predictor.backend_name
         # token count + prediction below
@@ -457,7 +404,7 @@ if __name__ == "__main__":
     # Replace these two variables with UI inputs later.
     input_title = "আইটি ট্রেনিং সেন্টারের ভিত্তি স্থাপন করলেন রাষ্ট্রপতি"
     input_body  = """
-    নেত্রকোনা: নেত্রকোনা শহরের পুরাতন জেলখানা সড়কে শেখ কামাল আইটি ট্রেনিং অ্যান্ড ইনকিউবেশন সেন্টারের ভিত্তিপ্রস্তর স্থাপন করেছেন রাষ্ট্রপতি মো. আবদুল হামিদ। বুধবার (০৩ অক্টোবর) বিকেল ৩টার দিকে তিনি এ ভিত্তিপ্রস্তর স্থাপন করেন। এর আগে তিনি হেলিকপ্টারে করে নেত্রকোনা বর্ডার গার্ড বাংলাদেশ (বিজিবি) ক্যাম্পে এসে পৌঁছান। এরপরে জেলা সার্কিট হাউজে রাষ্ট্রপতিকে গার্ড অব অনার দেওয়া হয়। বিকেলে তিনি প্রধান অতিথি হিসেবে যোগ দিয়ে মোক্তারপাড়া মাঠে আয়োজিত আন্তর্জাতিক লোকসংস্কৃতি বিষয়ক অনুষ্ঠান উদ্বোধন করেন। বাংলাদেশ সময়: ১৯১৪ ঘণ্টা, অক্টোবর ০৩, ২০১৮ এসআই
+নেত্রকোনা: নেত্রকোনা শহরের পুরাতন জেলখানা সড়কে শেখ কামাল আইটি ট্রেনিং অ্যান্ড ইনকিউবেশন সেন্টারের ভিত্তিপ্রস্তর স্থাপন করেছেন রাষ্ট্রপতি মো. আবদুল হামিদ। বুধবার বিকেলে তিনি এ ভিত্তিপ্রস্তর স্থাপন করেন। এর আগে তিনি হেলিকপ্টারে করে নেত্রকোনা বর্ডার গার্ড বাংলাদেশ (বিজিবি) ক্যাম্পে এসে পৌঁছান। অনুষ্ঠানে রাষ্ট্রপতি বলেন, এ অঞ্চলের তরুণ সমাজকে দক্ষ মানবসম্পদ হিসেবে গড়ে তুলতে এই ট্রেনিং সেন্টার গুরুত্বপূর্ণ ভূমিকা রাখবে।
     """
 
     # ── MODEL CHOICE ─────────────────────────────────────────

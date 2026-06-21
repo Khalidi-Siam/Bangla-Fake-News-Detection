@@ -4,7 +4,7 @@ import os
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-BASE_DIR = Path(os.getenv("BASE_DIR", "."))
+BASE_DIR = Path(os.getenv("BASE_DIR", Path(__file__).resolve().parent.parent))
 
 class DataDownloadConfig(BaseModel):
     hf_dataset_name: str = "hrshihab/BanFakeNews-2.0"
@@ -93,8 +93,9 @@ class Settings(BaseSettings):
     mamba_mlflow: MambaMLflowConfig = MambaMLflowConfig()
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(BASE_DIR / ".env"),   # absolute path — works regardless of CWD
         env_file_encoding="utf-8",
+        env_file_required=False,           # no error if .env doesn't exist
         extra="ignore",
         case_sensitive=False,
         env_nested_delimiter="__",

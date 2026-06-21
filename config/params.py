@@ -1,5 +1,5 @@
 from typing import List
-import torch
+from pathlib import Path
 
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -109,8 +109,9 @@ class ParamSettings(BaseSettings):
     mamba: MambaTrainParams  = MambaTrainParams()
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(Path(__file__).resolve().parent.parent / ".env"),
         env_file_encoding="utf-8",
+        env_file_required=False,
         extra="ignore",
         case_sensitive=False,
         env_nested_delimiter="__",
