@@ -13,13 +13,14 @@ PRE-REQUISITE:
   Artifacts/best_model/mamba/
 =============================================================
 """
-
+import os
 import sys
 import time
 import json
 import numpy as np
 import pandas as pd
 import torch
+from src.utils.logger import log_filepath
 from pathlib import Path
 from torch.utils.data import DataLoader
 from datasets import Dataset
@@ -430,6 +431,11 @@ class MambaEvaluate:
         if self.results_file.exists():
             mlflow.log_artifact(str(self.results_file), artifact_path="results")
             logging.info(f"  ✓ Results JSON logged  → results/{self.results_file.name}")
+
+        # ── 3b. Run log file artifact ───────────────────────────────
+        if os.path.exists(log_filepath):
+            mlflow.log_artifact(log_filepath, artifact_path="logs")
+            logging.info(f"  ✓ Run log file logged  → logs/{os.path.basename(log_filepath)}")
 
         # ── 4. Best model ──
         if settings.mamba_mlflow.log_model and self.best_model_dir.exists():

@@ -567,9 +567,6 @@ class MambaTrainer:
                     step=epoch + 1,
                 )
 
-            # Save checkpoint (every epoch, keep latest 2)
-            self._save_checkpoint(epoch)
-
             # Save best model if val Macro-F1 improved
             if val_metrics["macro_f1"] > self.best_f1:
                 self.best_f1 = val_metrics["macro_f1"]
@@ -577,6 +574,9 @@ class MambaTrainer:
                 logging.info(f"  🏆 New best Macro-F1 = {self.best_f1:.4f}")
             else:
                 logging.info(f"  No improvement. Best = {self.best_f1:.4f}")
+
+            # Save checkpoint (every epoch, keep latest 2)
+            self._save_checkpoint(epoch)
 
     # ──────────────────────────────────────────────────────────
     # PUBLIC: run full Mamba training pipeline

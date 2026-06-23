@@ -13,7 +13,7 @@ PRE-REQUISITE:
   Artifacts/best_model/banglabert/
 =============================================================
 """
-
+import os
 import sys
 import time
 import json
@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import torch
 from pathlib import Path
+from src.utils.logger import log_filepath
 from torch.utils.data import DataLoader
 from transformers import AutoModelForSequenceClassification
 from datasets import Dataset
@@ -456,6 +457,11 @@ class BertEvaluate:
         if self.results_file.exists():
             mlflow.log_artifact(str(self.results_file), artifact_path="results")
             logging.info(f"  ✓ Results JSON logged  → results/{self.results_file.name}")
+
+        # ── 3b. Run log file artifact ───────────────────────────────
+        if os.path.exists(log_filepath):
+            mlflow.log_artifact(log_filepath, artifact_path="logs")
+            logging.info(f"  ✓ Run log file logged  → logs/{os.path.basename(log_filepath)}")
 
         # ── 4. Best model (upload saved HF directory as MLflow artifacts) ──
         #
