@@ -463,7 +463,7 @@ The figure below compares all three models on the test set across four dimension
 > **Key takeaways:**
 > - BanglaBERT leads on classification metrics thanks to large-scale Bangla pretraining.
 > - BanglaMamba-Small (24M) matches BanglaBERT closely on Fake-F1 and AUC-ROC while using **3–4× less VRAM** and **80% less parameter**.
-> - BanglaMamba-Large (43M) sits between the two on accuracy but stays memory-efficient.
+> - BanglaMamba-Large (43M) gives similar results to BanglaMamba-Small. Though the model is larger, it provides no extra improvement since the dataset was insufficient for the larger model to benefit from its increased capacity. After about two epochs, both models began to overfit, indicating that the dataset size limited further improvements through longer training.
 
 ---
 
@@ -476,7 +476,7 @@ BanglaBERT must truncate long articles; Mamba models read them in full.
 
 > **Key takeaways:**
 > - BanglaBERT's Macro-F1 drops **~4.7 percentage points** on long articles due to truncation.
-> - BanglaMamba-Small degrades by only **~0.9 pp**, demonstrating strong long-context robustness.
+> - BanglaMamba-Small degrades by only **~0.9 percentage points**, demonstrating strong long-context robustness.
 > - Mamba's linear-complexity SSM is a natural fit for longer Bangla news articles.
 
 The evaluation covers:
@@ -507,3 +507,10 @@ The evaluation covers:
 - **Hybrid architectures** — Explore Transformer + Mamba hybrid models (e.g., attention for local context, SSM for long-range dependencies).
 
 ---
+## Known Issues & Notes
+
+- **PyTorch on Windows** — `torch==2.4.0` causes errors on Windows. Use `torch==2.12.1` if running natively on Windows. The Docker image (Linux) works fine with `2.4.0`.
+
+- **Mamba Requires GPU to Train** — `causal-conv1d` and `mamba-ssm` are CUDA extensions that require a GPU to install and run. There is no CPU fallback for training. Use Modal for cloud GPU access, then convert the trained weights to HuggingFace format for local CPU inference (see [CPU Inference](#cpu-inference--mamba-conversion)).
+
+- **Class Imbalance** — The dataset is heavily imbalanced (~83.5% Real, ~16.5% Fake). Weighted cross-entropy loss is applied with pre-computed class weights (`Fake=3.03, Real=0.60`). The Macro-F1 score (not accuracy) is used as the primary evaluation metric to account for this imbalance.

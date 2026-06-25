@@ -64,7 +64,7 @@ class MambaTrainParams(BaseModel):
     d_model: int            = 512
     n_layer: int            = 16
     num_labels: int         = 2
-    max_length: int         = 768     # Mamba context window (vs BERT 512)
+    max_length: int         = 1024     # Mamba context window (vs BERT 512)
 
     # ── Training ───────────────────────────────────────────────
     epochs: int             = 5
