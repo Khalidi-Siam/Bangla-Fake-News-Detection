@@ -16,7 +16,7 @@ volume = modal.Volume.from_name("datasets-volume")
     timeout=60 * 10,
 )
 def download_folder():
-    source_dir = f"/root/datasets/{TARGET_FOLDER}"
+    source_dir = f"/root/datasets/Artifacts/{TARGET_FOLDER}"
     archive_path = f"/tmp/{TARGET_FOLDER}.tar.gz"
 
     if not os.path.exists(source_dir):

@@ -28,40 +28,10 @@ Otherwise, for different max_length you need to run this tokenizer separately fo
 # stage = "BanglaBERT Fine-Tuning"
 # logging.info(f"Stage {stage} started")
 # bert_finetuner = BertFineTune()
-# bert_finetuner.initialize_bert_finetuning()   # also triggers BertEvaluate internally
-
-
-# ── BanglaBERT Evaluation (Steps 7–10: standalone re-evaluation on saved best model) ──
-# Useful if you want to re-run evaluation without re-training.
-# stage = "BanglaBERT Evaluation"
-# logging.info(f"Stage {stage} started")
-# evaluator = BertEvaluate()
-# evaluator.initialize_bert_evaluation(
-#     test_loader      = ...,   # pass a pre-built DataLoader
-#     tokenizer        = ...,   # pass a pre-loaded tokenizer
-#     training_config  = {},    # optional metadata dict
-#     training_history = [],    # optional per-epoch history
-#     best_val_f1      = 0.0,   # optional scalar
-# )
-
+# bert_finetuner.initialize_bert_finetuning()   # also triggers BertEvaluate internally with test set
 
 # ── Bangla-Mamba Training (Steps 1–10: tokenizer, datasets, build, train, evaluate) ──
 stage = "Bangla-Mamba Training"
 logging.info(f"Stage {stage} started")
 mamba_trainer = MambaTrainer()
-mamba_trainer.initialize_mamba_training() # also triggers MambaEvaluate internally
-
-
-# ── Bangla-Mamba Evaluation (Steps 7–10: standalone re-evaluation on saved best model) ──
-# Useful if you want to re-run evaluation without re-training.
-# stage = "Bangla-Mamba Evaluation"
-# logging.info(f"Stage {stage} started")
-# evaluator = MambaEvaluate()
-# evaluator.initialize_mamba_evaluation(
-#     test_loader      = ...,   # pass a pre-built DataLoader
-#     tokenizer        = ...,   # pass a pre-loaded tokenizer
-#     training_config  = {},    # optional metadata dict
-#     training_history = [],    # optional per-epoch history
-#     best_val_f1      = 0.0,   # optional scalar
-# )
-
+mamba_trainer.initialize_mamba_training() # also triggers MambaEvaluate internally with test set

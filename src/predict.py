@@ -8,11 +8,9 @@ Input     : title (headline) + news body (content)
 Cleaning  : same clean_bangla() used in data_ingestion.py
 Output    : Fake / Real label + class probabilities
 
-Mamba backend auto-selection:
-  • CUDA available  → mamba-ssm  (original, fast)
-                      loads from  Artifacts/best_model/mamba_768/
+Mamba inference:
   • CPU only        → HuggingFace MambaModel  (pure PyTorch)
-                      loads from  Artifacts/best_model/mamba_768_hf/
+                      loads from  Artifacts/best_model/mamba_1024_hf/
                       (generate with modal_utils/convert_mamba_to_hf.py)
 =============================================================
 Usage (two-variable mode — UI variables):
@@ -240,16 +238,16 @@ class BertPredictor:
 
 
 # =============================================================
-# MAMBA PREDICTOR  — GPU (mamba-ssm) or CPU (HF MambaModel)
+# MAMBA PREDICTOR  — CPU (HF MambaModel)
 # =============================================================
 class MambaPredictor:
     """
-    Smart Mamba predictor for CPU (HF MambaModel).
-    Loads from: Artifacts/best_model/mamba_768_hf/
+    Mamba predictor for CPU (HF MambaModel).
+    Loads from: Artifacts/best_model/mamba_1024_hf/
     """
 
     # Paths
-    CPU_MODEL_DIR = settings.mamba_train.best_model_dir.parent / "mamba_768_hf"  # HF weights
+    CPU_MODEL_DIR = settings.mamba_train.best_model_dir.parent / "mamba_1024_hf"  # HF weights
 
     def __init__(self, device: str = "cpu"):
         self.max_length = params.mamba.max_length
@@ -270,7 +268,7 @@ class MambaPredictor:
                 f"[Mamba-HF] Converted model not found at '{model_dir}'.\n"
                 "Run the conversion script first:\n"
                 "    modal run modal_utils/convert_mamba_to_hf.py\n"
-                "Then download the folder to Artifacts/best_model/mamba_768_hf/"
+                "Then download the folder to Artifacts/best_model/mamba_1024_hf/"
             )
         self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
         self.model     = BanglaMambaHFForClassification.load(
@@ -408,8 +406,8 @@ if __name__ == "__main__":
     """
 
     # ── MODEL CHOICE ─────────────────────────────────────────
-    # "bert"  → BanglaBERT   (works on CPU and GPU, no extra steps)
-    # "mamba" → Bangla-Mamba (GPU: auto; CPU: needs mamba_768_hf/ folder)
+    # "bert"  → BanglaBERT   (CPU-based inference)
+    # "mamba" → Bangla-Mamba (CPU: needs mamba_1024_hf/ folder)
     model_choice = "mamba"   # ← change to "mamba" when ready
     # ─────────────────────────────────────────────────────────
 
