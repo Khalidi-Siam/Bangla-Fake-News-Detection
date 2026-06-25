@@ -84,8 +84,8 @@ def convert():
 
     # ── Paths ────────────────────────────────────────────────
     BASE_DIR        = Path("/root/datasets")
-    SRC_DIR         = BASE_DIR / "Artifacts" / "best_model" / "mamba_768"
-    DST_DIR         = BASE_DIR / "Artifacts" / "best_model" / "mamba_768_hf"
+    SRC_DIR         = BASE_DIR / "Artifacts" / "best_model" / "mamba_1024" # update path based on model
+    DST_DIR         = BASE_DIR / "Artifacts" / "best_model" / "mamba_1024_hf" # update path based on model
     DST_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")

@@ -223,4 +223,5 @@ temp/
 logs/
 tokenized_cache/
 Artifacts/
+Artifacts(old)/
 *.tar.gz

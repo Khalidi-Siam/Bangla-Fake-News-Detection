@@ -294,6 +294,40 @@ All configuration lives in the [`config/`](file:///d:/Bangla-Fake-News-Detection
 
 **To change any path, directory, model setting, or hyperparameter, edit these two files only.**
 
+### Key Hyperparameter Breakdown
+
+Below are the most critical training and model hyperparameters configured in `params.py`, explaining what they do and why their settings differ between BanglaBERT and Bangla-Mamba:
+
+#### 1. Learning Rate (`learning_rate`)
+*   **What it is:** The step size at which the optimizer updates model weights during gradient descent.
+*   **Why it differs:**
+    *   **BanglaBERT (`2e-5`):** Uses a small learning rate. Because the model is already pre-trained on a massive Bangla corpus, we only perform fine-tuning. A high learning rate would destroy ("catastrophic forgetting") the pre-learned language representations.
+    *   **Bangla-Mamba (`1e-3`):** Uses a significantly higher learning rate. Since we train Mamba from scratch (random initialization), the model needs larger updates to learn general syntax, token relationships, and classification signals from scratch.
+
+#### 2. Context Length (`max_length`)
+*   **What it is:** The maximum number of tokens processed per input sequence before truncation.
+*   **Why it differs:**
+    *   **BanglaBERT (`512`):** This is a hard structural limit for BERT-style transformer architectures. Since self-attention scales quadratically ($O(N^2)$), processing longer sequences incurs severe memory and computational costs.
+    *   **Bangla-Mamba (`1024` or `768`):** Mamba scales linearly ($O(N)$), allowing us to double the sequence length to 1024. This captures crucial information near the middle or end of long news articles that BanglaBERT is forced to truncate.
+
+#### 3. Effective Batch Size (`batch_size` & `grad_accum`)
+*   **What it is:** The number of samples processed before updating model parameters. The effective batch size is calculated as: `effective_batch_size = batch_size * grad_accum`.
+*   **Why it matters:** 
+    *   Larger effective batches stabilize gradient calculations and accelerate training. 
+    *   By using gradient accumulation (`grad_accum = 2`), we run smaller physical batches (`batch_size = 32`) to fit inside VRAM while enjoying the optimization stability of a larger batch size (`64`).
+
+#### 4. Loss Class Weights (`class_weights`)
+*   **What it is:** A weighting factor applied to the cross-entropy loss function (`[Fake=3.0295, Real=0.5988]`).
+*   **Why it matters:** The BanFakeNews-2.0 dataset is highly imbalanced (~83.5% Real, ~16.5% Fake). Without weighting, a classifier could achieve high accuracy by simply predicting "Real" for every news article. Applying inverse frequency weights penalizes errors on the minority ("Fake") class 5× harder, forcing the model to learn features of misinformation.
+
+#### 5. Learning Rate Warmup (`warmup_pct`)
+*   **What it is:** The fraction of total training steps during which the learning rate gradually climbs from 0 to its maximum value (e.g., first 10% of training steps).
+*   **Why it matters:** Prevents early training instability. When training starts, gradients can be large and noisy. Gradually scaling the learning rate up prevents weight distortion or numerical overflow in early updates, followed by a smooth cosine decay schedule.
+
+#### 6. Mamba Capacity (`d_model` & `n_layer`)
+*   **What it is:** `d_model` determines the width (hidden state dimension) and `n_layer` controls the depth (number of stacked Mamba blocks).
+*   **Why it matters:** These hyperparameters define model capacity and parameter counts (24M for small, 43M for large). When training from scratch on relatively small datasets, selecting these values is a trade-off: too large a model causes rapid overfitting, while too small a model fails to capture complex linguistic patterns.
+
 ---
 
 ## Pipeline Stages
@@ -447,6 +481,7 @@ All training runs are tracked via MLflow on DagsHub.
 - All hyperparameters (model name, batch size, LR, `max_length`, etc.)
 - Final test metrics: Macro-F1, AUC-ROC, per-class Precision / Recall / F1
 - Model artifacts *(optional — set `log_model: False` in config to skip large uploads)*
+- Traning summary and log file
 
 Configure credentials via `.env` (see [Setup & Installation](#setup--installation)).
 
