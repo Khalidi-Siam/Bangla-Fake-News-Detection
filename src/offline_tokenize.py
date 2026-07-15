@@ -136,7 +136,7 @@ class OfflineTokenize:
             logging.info(f"    Truncated by BanglaBERT (> 512 tokens) : {pct_512:.1f}%")
             logging.info(f"    Truncated by Mamba-768  (> 768 tokens) : {pct_768:.1f}%")
             logging.info(f"    Exceed 1024 tokens                     : {pct_1024:.1f}%")
-            logging.info(f"\n  Thesis argument: Mamba-768 fully reads {(100-pct_768):.1f}% of all articles")
+            logging.info(f"\n  Thesis argument: Mamba-1024 fully reads {(100-pct_1024):.1f}% of all articles")
             logging.info(f"     vs BanglaBERT which fully reads only {pct_fit:.1f}%")
 
             logging.info("\n  Token count by label:")

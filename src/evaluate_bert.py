@@ -27,9 +27,14 @@ from transformers import AutoModelForSequenceClassification
 from datasets import Dataset
 from sklearn.metrics import (
     classification_report,
+    confusion_matrix,
     f1_score,
-    roc_auc_score,
+    matthews_corrcoef,
     precision_recall_fscore_support,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    average_precision_score,
 )
 import mlflow
 import warnings
@@ -77,6 +82,47 @@ class BertEvaluate:
         self.model        = None
         self.tokenizer    = None
         self.eval_profiling: dict = {}   # populated by _evaluate(profile=True)
+
+    # ──────────────────────────────────────────────────────────
+    # INTERNAL — Expected Calibration Error (ECE)
+    # ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _compute_ece(
+        labels: np.ndarray,
+        probs: np.ndarray,
+        n_bins: int = 10,
+    ) -> float:
+        """
+        Compute Expected Calibration Error for binary classification.
+
+        Bins samples by the predicted positive-class probability and
+        measures the weighted average gap between mean confidence and
+        observed accuracy in each bin.  Lower is better (0 = perfect
+        calibration).
+
+        Args:
+            labels: Ground-truth binary labels (0 or 1).
+            probs:  Predicted probability for the positive class (class 1).
+            n_bins: Number of equal-width bins (default 10).
+
+        Returns:
+            ECE value in [0, 1].
+        """
+        bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+        ece = 0.0
+        n_total = len(labels)
+        for i in range(n_bins):
+            mask = (probs > bin_edges[i]) & (probs <= bin_edges[i + 1])
+            # First bin: include probs == 0.0
+            if i == 0:
+                mask = (probs >= bin_edges[i]) & (probs <= bin_edges[i + 1])
+            n_bin = mask.sum()
+            if n_bin == 0:
+                continue
+            avg_confidence = probs[mask].mean()
+            avg_accuracy   = labels[mask].mean()
+            ece += (n_bin / n_total) * abs(avg_accuracy - avg_confidence)
+        return ece
 
     # ──────────────────────────────────────────────────────────
     # INTERNAL — Model inference helper
@@ -152,33 +198,63 @@ class BertEvaluate:
             digits=4,
         )
 
+        # ── New metrics ────────────────────────────────────────
+        mcc          = matthews_corrcoef(all_labels, all_preds)
+        pr_auc       = average_precision_score(all_labels, all_probs)
+        weighted_p   = precision_score(all_labels, all_preds, average="weighted")
+        weighted_r   = recall_score(all_labels, all_preds, average="weighted")
+        weighted_f1  = f1_score(all_labels, all_preds, average="weighted")
+        cm           = confusion_matrix(all_labels, all_preds, labels=[0, 1])
+
+        # ── Expected Calibration Error (ECE) ───────────────────
+        ece = self._compute_ece(all_labels, all_probs, n_bins=10)
+
         metrics = {
-            "split"         : split_name,
-            "macro_f1"      : float(macro_f1),
-            "auc_roc"       : float(auc_roc),
-            "fake_precision": float(p[0]),
-            "fake_recall"   : float(r[0]),
-            "fake_f1"       : float(f[0]),
-            "real_precision": float(p[1]),
-            "real_recall"   : float(r[1]),
-            "real_f1"       : float(f[1]),
+            "split"              : split_name,
+            "macro_f1"           : float(macro_f1),
+            "auc_roc"            : float(auc_roc),
+            "mcc"                : float(mcc),
+            "pr_auc"             : float(pr_auc),
+            "ece"                : float(ece),
+            "weighted_precision" : float(weighted_p),
+            "weighted_recall"    : float(weighted_r),
+            "weighted_f1"        : float(weighted_f1),
+            "confusion_matrix"   : cm.tolist(),
+            "fake_precision"     : float(p[0]),
+            "fake_recall"        : float(r[0]),
+            "fake_f1"            : float(f[0]),
+            "real_precision"     : float(p[1]),
+            "real_recall"        : float(r[1]),
+            "real_f1"            : float(f[1]),
         }
 
         logging.info(f"\n  [{split_name.upper()}]")
         logging.info(f"  Macro-F1 = {macro_f1:.4f}  |  AUC-ROC = {auc_roc:.4f}")
+        logging.info(f"  MCC = {mcc:.4f}  |  PR-AUC = {pr_auc:.4f}  |  ECE = {ece:.4f}")
+        logging.info(f"  Weighted →  P={weighted_p:.4f}  R={weighted_r:.4f}  F1={weighted_f1:.4f}")
         logging.info(f"  Fake  →  P={p[0]:.4f}  R={r[0]:.4f}  F1={f[0]:.4f}")
         logging.info(f"  Real  →  P={p[1]:.4f}  R={r[1]:.4f}  F1={f[1]:.4f}")
+        logging.info(f"  Confusion Matrix (rows=true, cols=pred):")
+        logging.info(f"    Fake: {cm[0].tolist()}")
+        logging.info(f"    Real: {cm[1].tolist()}")
         logging.info(f"\n{report}")
 
         # ── Collect profiling stats ─────────────────────────────────
         if profile and batch_times_ms:
+            total_samples = len(all_labels)
+            total_time_s = sum(batch_times_ms) / 1000
+            throughput_samples = total_samples / total_time_s if total_time_s > 0 else 0.0
+            throughput_tokens = (total_samples * self.max_length) / total_time_s if total_time_s > 0 else 0.0
+
             profiling: dict = {
-                "eval_num_batches"   : len(batch_times_ms),
-                "eval_total_time_s"  : round(sum(batch_times_ms) / 1000, 3),
-                "eval_avg_batch_ms"  : round(float(np.mean(batch_times_ms)),              2),
-                "eval_p50_batch_ms"  : round(float(np.percentile(batch_times_ms, 50)),    2),
-                "eval_p95_batch_ms"  : round(float(np.percentile(batch_times_ms, 95)),    2),
-                "eval_max_batch_ms"  : round(float(np.max(batch_times_ms)),               2),
+                "eval_num_batches"              : len(batch_times_ms),
+                "eval_total_time_s"             : round(total_time_s, 3),
+                "eval_avg_batch_ms"             : round(float(np.mean(batch_times_ms)),              2),
+                "eval_p50_batch_ms"             : round(float(np.percentile(batch_times_ms, 50)),    2),
+                "eval_p95_batch_ms"             : round(float(np.percentile(batch_times_ms, 95)),    2),
+                "eval_max_batch_ms"             : round(float(np.max(batch_times_ms)),               2),
+                "eval_throughput_samples_per_s" : round(throughput_samples, 2),
+                "eval_throughput_tokens_per_s"  : round(throughput_tokens, 2),
             }
             if self.device == "cuda":
                 peak_mb = torch.cuda.max_memory_allocated(self.device) / (1024 ** 2)
@@ -188,6 +264,7 @@ class BertEvaluate:
             logging.info(
                 f"  Eval profiling: total={profiling['eval_total_time_s']:.2f}s  "
                 f"avg_batch={profiling['eval_avg_batch_ms']:.1f}ms  "
+                f"throughput={profiling['eval_throughput_samples_per_s']:.1f} samples/s ({profiling['eval_throughput_tokens_per_s']:.1f} tokens/s)  "
                 + (f"peak_VRAM={profiling.get('eval_peak_vram_mb', 0):.0f} MB"
                    if self.device == "cuda" else "")
             )
@@ -307,6 +384,7 @@ class BertEvaluate:
         training_config: dict,
         training_history: list,
         best_val_f1: float,
+        best_epoch: int = None,
     ):
         """
         Print thesis comparison table and persist all results to JSON.
@@ -317,6 +395,7 @@ class BertEvaluate:
             training_config:  Config snapshot from BertFineTune (model, LR, etc.).
             training_history: Per-epoch history list from BertFineTune.
             best_val_f1:      Best validation Macro-F1 from BertFineTune.
+            best_epoch:       Best epoch integer.
         """
         from src.utils.common import section
         section("STEP 9 · Results Summary & Save")
@@ -340,13 +419,24 @@ class BertEvaluate:
 
         # ── Save JSON ─────────────────────────────────────────
         create_directory(self.results_file.parent)
+        
+        # Calculate overall peak training VRAM if available in history
+        train_peaks = [
+            h["train_peak_vram_mb"]
+            for h in training_history
+            if isinstance(h, dict) and "train_peak_vram_mb" in h
+        ]
+        overall_train_peak = max(train_peaks) if train_peaks else None
+
         results = {
-            "config"            : training_config,
-            "training_history"  : training_history,
-            "best_val_macro_f1" : round(best_val_f1, 4),
-            "test_metrics"      : test_metrics,
-            "subset_results"    : subset_results,
-            "profiling"         : self.eval_profiling,   # VRAM + batch timing
+            "config"                       : training_config,
+            "training_history"             : training_history,
+            "best_val_macro_f1"            : round(best_val_f1, 4),
+            "best_epoch"                   : best_epoch,  
+            "overall_training_peak_vram_mb": overall_train_peak,
+            "test_metrics"                 : test_metrics,
+            "subset_results"               : subset_results,
+            "profiling"                    : self.eval_profiling,   # VRAM + batch timing
         }
         with open(self.results_file, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
@@ -360,6 +450,7 @@ class BertEvaluate:
         test_metrics: dict,
         training_history: list,
         best_val_f1: float,
+        best_epoch: int = None,
     ):
         """
         Print a final boxed summary of BanglaBERT results.
@@ -372,18 +463,28 @@ class BertEvaluate:
         from src.utils.common import section
         section("Evaluation Complete ✅")
         total_train_min = sum(h.get("time_min", 0) for h in training_history)
+        epoch_str = str(best_epoch) if best_epoch is not None else "N/A"
+        throughput_samp = self.eval_profiling.get("eval_throughput_samples_per_s", 0.0)
+        throughput_tok = self.eval_profiling.get("eval_throughput_tokens_per_s", 0.0)
         logging.info(f"""
   ┌──────────────────────────────────────────────────┐
   │            BANGLABERT RESULTS SUMMARY            │
   ├──────────────────────────────────────────────────┤
   │  Best Val  Macro-F1  : {best_val_f1:<10.4f}                │
+  │  Best Epoch          : {epoch_str:<10}                │
   │  Test      Macro-F1  : {test_metrics['macro_f1']:<10.4f}                │
   │  Test      AUC-ROC   : {test_metrics['auc_roc']:<10.4f}                │
+  │  Test      MCC       : {test_metrics['mcc']:<10.4f}                │
+  │  Test      PR-AUC    : {test_metrics['pr_auc']:<10.4f}                │
+  │  Test      ECE       : {test_metrics['ece']:<10.4f}                │
+  │  Test      W-F1      : {test_metrics['weighted_f1']:<10.4f}                │
   │  Test      Fake-F1   : {test_metrics['fake_f1']:<10.4f}                │
   │  Test      Real-F1   : {test_metrics['real_f1']:<10.4f}                │
   ├──────────────────────────────────────────────────┤
-  │  Total training time : {total_train_min:<6.1f} min                  │
-  │  Precision used      : {'BF16 (A100 native)' if self.use_bf16 else 'FP32':<25}   │
+  │  Total training time : {total_train_min:<6.1f} min                │
+  │  Precision used      : {'BF16 (A100 native)' if self.use_bf16 else 'FP32':<25} │
+  │  Throughput (samp/s) : {throughput_samp:<10.2f}                │
+  │  Throughput (tok/s)  : {throughput_tok:<10.2f}                │
   ├──────────────────────────────────────────────────┤
   │  Best model → {str(self.best_model_dir):<33} │
   │  Results   → {str(self.results_file):<33} │
@@ -401,6 +502,7 @@ class BertEvaluate:
         test_metrics: dict,
         subset_results: dict,
         best_val_f1: float,
+        best_epoch: int = None,
     ):
         """
         Log final evaluation artefacts to the currently active MLflow run.
@@ -420,17 +522,26 @@ class BertEvaluate:
         section("MLflow · Logging Evaluation Results")
 
         # ── 1. Final scalar metrics ──────────────────────────────────
-        mlflow.log_metrics({
-            "best_val/macro_f1"   : round(best_val_f1, 4),
-            "test/macro_f1"       : round(test_metrics["macro_f1"],       4),
-            "test/auc_roc"        : round(test_metrics["auc_roc"],        4),
-            "test/fake_precision" : round(test_metrics["fake_precision"],  4),
-            "test/fake_recall"    : round(test_metrics["fake_recall"],     4),
-            "test/fake_f1"        : round(test_metrics["fake_f1"],         4),
-            "test/real_precision" : round(test_metrics["real_precision"],  4),
-            "test/real_recall"    : round(test_metrics["real_recall"],     4),
-            "test/real_f1"        : round(test_metrics["real_f1"],         4),
-        })
+        metrics_to_log = {
+            "best_val/macro_f1"      : round(best_val_f1, 4),
+            "test/macro_f1"          : round(test_metrics["macro_f1"],          4),
+            "test/auc_roc"           : round(test_metrics["auc_roc"],           4),
+            "test/mcc"               : round(test_metrics["mcc"],               4),
+            "test/pr_auc"            : round(test_metrics["pr_auc"],            4),
+            "test/ece"               : round(test_metrics["ece"],               4),
+            "test/weighted_precision": round(test_metrics["weighted_precision"], 4),
+            "test/weighted_recall"   : round(test_metrics["weighted_recall"],   4),
+            "test/weighted_f1"       : round(test_metrics["weighted_f1"],       4),
+            "test/fake_precision"    : round(test_metrics["fake_precision"],    4),
+            "test/fake_recall"       : round(test_metrics["fake_recall"],       4),
+            "test/fake_f1"           : round(test_metrics["fake_f1"],           4),
+            "test/real_precision"    : round(test_metrics["real_precision"],    4),
+            "test/real_recall"       : round(test_metrics["real_recall"],       4),
+            "test/real_f1"           : round(test_metrics["real_f1"],           4),
+        }
+        if best_epoch is not None:
+            metrics_to_log["best_val/epoch"] = best_epoch
+        mlflow.log_metrics(metrics_to_log)
         logging.info("  ✓ Test metrics logged to MLflow")
 
         # ── 2. Thesis experiment subset metrics ──────────────────────
@@ -507,6 +618,12 @@ class BertEvaluate:
             training_history: Per-epoch history list (from BertFineTune).
             best_val_f1:      Best validation Macro-F1 (from BertFineTune).
         """
+        # Determine the best epoch from training history
+        best_epoch = None
+        if training_history:
+            best_idx = np.argmax([h.get("macro_f1", 0.0) for h in training_history])
+            best_epoch = int(training_history[best_idx].get("epoch"))
+
         test_metrics   = self.evaluate_test(test_loader)
         subset_results = self.thesis_experiment(tokenizer)
         self.save_results(
@@ -515,11 +632,12 @@ class BertEvaluate:
             training_config,
             training_history,
             best_val_f1,
+            best_epoch,
         )
-        self.print_summary(test_metrics, training_history, best_val_f1)
+        self.print_summary(test_metrics, training_history, best_val_f1, best_epoch)
 
         # ── MLflow: log metrics + artifacts + best model ──────────────
         # Runs inside the active MLflow run opened by BertFineTune.
         # self.model is already the best model reloaded from disk;
         # self.tokenizer is set by thesis_experiment() above.
-        self._log_to_mlflow(test_metrics, subset_results, best_val_f1)
+        self._log_to_mlflow(test_metrics, subset_results, best_val_f1, best_epoch)

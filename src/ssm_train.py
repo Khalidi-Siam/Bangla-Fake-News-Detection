@@ -39,9 +39,14 @@ from transformers import AutoTokenizer
 from datasets import load_from_disk
 from sklearn.metrics import (
     classification_report,
+    confusion_matrix,
     f1_score,
-    roc_auc_score,
+    matthews_corrcoef,
     precision_recall_fscore_support,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    average_precision_score,
 )
 import mlflow
 import warnings
@@ -218,7 +223,7 @@ class MambaTrainer:
             raise CustomException(e, sys)
 
         logging.info(f"  ✅ Resumed from         : {ckpt_path}")
-        logging.info(f"     Last completed epoch  : {state['epoch'] + 1}")
+        logging.info(f"     Last completed epoch  : {state['epoch']}")
         logging.info(f"     Best val Macro-F1     : {state['best_f1']:.4f}")
         return state["epoch"]
 
@@ -312,7 +317,7 @@ class MambaTrainer:
             pin_memory  = True,
         )
 
-        steps_per_epoch = len(self.train_loader) // self.grad_accum
+        steps_per_epoch = (len(self.train_loader) + self.grad_accum - 1) // self.grad_accum
         total_steps     = steps_per_epoch * self.epochs
         logging.info(f"\n  Steps/epoch  : {steps_per_epoch}")
         logging.info(f"  Total steps  : {total_steps:,}")
@@ -384,12 +389,11 @@ class MambaTrainer:
             final_div_factor = 1e4,      # end LR   = max_lr / (25 × 1e4)
         )
 
-        # ── Resume state if checkpoint exists ─────────────────
         start_epoch = 0
         if checkpoint_path:
             last_epoch  = self._load_checkpoint(checkpoint_path)
-            start_epoch = last_epoch + 1
-            logging.info(f"  Resuming from epoch {start_epoch + 1}")
+            start_epoch = last_epoch
+            logging.info(f"  Next epoch to train : {start_epoch + 1}")
         else:
             logging.info("  Starting fresh training from epoch 1")
 
@@ -398,12 +402,16 @@ class MambaTrainer:
     # ──────────────────────────────────────────────────────────
     # STEP 4 — TRAIN ONE EPOCH
     # ──────────────────────────────────────────────────────────
-    def _train_one_epoch(self, epoch: int) -> tuple:
+    def _train_one_epoch(self, epoch: int, reset_vram_peak: bool = False) -> tuple:
         self.model.train()
         total_loss = 0.0
         correct    = 0
         total      = 0
         steps      = 0
+
+        # ── Reset VRAM peak counter before the training pass ────────────
+        if reset_vram_peak and self.device == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
 
         self.optimizer.zero_grad()
 
@@ -458,6 +466,47 @@ class MambaTrainer:
         return total_loss / steps, correct / total * 100
 
     # ──────────────────────────────────────────────────────────
+    # INTERNAL — Expected Calibration Error (ECE)
+    # ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _compute_ece(
+        labels: np.ndarray,
+        probs: np.ndarray,
+        n_bins: int = 10,
+    ) -> float:
+        """
+        Compute Expected Calibration Error for binary classification.
+
+        Bins samples by the predicted positive-class probability and
+        measures the weighted average gap between mean confidence and
+        observed accuracy in each bin.  Lower is better (0 = perfect
+        calibration).
+
+        Args:
+            labels: Ground-truth binary labels (0 or 1).
+            probs:  Predicted probability for the positive class (class 1).
+            n_bins: Number of equal-width bins (default 10).
+
+        Returns:
+            ECE value in [0, 1].
+        """
+        bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+        ece = 0.0
+        n_total = len(labels)
+        for i in range(n_bins):
+            mask = (probs > bin_edges[i]) & (probs <= bin_edges[i + 1])
+            # First bin: include probs == 0.0
+            if i == 0:
+                mask = (probs >= bin_edges[i]) & (probs <= bin_edges[i + 1])
+            n_bin = mask.sum()
+            if n_bin == 0:
+                continue
+            avg_confidence = probs[mask].mean()
+            avg_accuracy   = labels[mask].mean()
+            ece += (n_bin / n_total) * abs(avg_accuracy - avg_confidence)
+        return ece
+
+    # ──────────────────────────────────────────────────────────
     # STEP 5 — EVALUATE (validation only, during training loop)
     # ──────────────────────────────────────────────────────────
     @torch.no_grad()
@@ -502,22 +551,45 @@ class MambaTrainer:
             digits=4,
         )
 
+        # ── New metrics ────────────────────────────────────────
+        mcc          = matthews_corrcoef(all_labels, all_preds)
+        pr_auc       = average_precision_score(all_labels, all_probs)
+        weighted_p   = precision_score(all_labels, all_preds, average="weighted")
+        weighted_r   = recall_score(all_labels, all_preds, average="weighted")
+        weighted_f1  = f1_score(all_labels, all_preds, average="weighted")
+        cm           = confusion_matrix(all_labels, all_preds, labels=[0, 1])
+
+        # ── Expected Calibration Error (ECE) ───────────────────
+        ece = self._compute_ece(all_labels, all_probs, n_bins=10)
+
         metrics = {
-            "split"         : split_name,
-            "macro_f1"      : float(macro_f1),
-            "auc_roc"       : float(auc_roc),
-            "fake_precision": float(p[0]),
-            "fake_recall"   : float(r[0]),
-            "fake_f1"       : float(f[0]),
-            "real_precision": float(p[1]),
-            "real_recall"   : float(r[1]),
-            "real_f1"       : float(f[1]),
+            "split"              : split_name,
+            "macro_f1"           : float(macro_f1),
+            "auc_roc"            : float(auc_roc),
+            "mcc"                : float(mcc),
+            "pr_auc"             : float(pr_auc),
+            "ece"                : float(ece),
+            "weighted_precision" : float(weighted_p),
+            "weighted_recall"    : float(weighted_r),
+            "weighted_f1"        : float(weighted_f1),
+            "confusion_matrix"   : cm.tolist(),
+            "fake_precision"     : float(p[0]),
+            "fake_recall"        : float(r[0]),
+            "fake_f1"            : float(f[0]),
+            "real_precision"     : float(p[1]),
+            "real_recall"        : float(r[1]),
+            "real_f1"            : float(f[1]),
         }
 
         logging.info(f"\n  [{split_name.upper()}]")
         logging.info(f"  Macro-F1 = {macro_f1:.4f}  |  AUC-ROC = {auc_roc:.4f}")
+        logging.info(f"  MCC = {mcc:.4f}  |  PR-AUC = {pr_auc:.4f}  |  ECE = {ece:.4f}")
+        logging.info(f"  Weighted →  P={weighted_p:.4f}  R={weighted_r:.4f}  F1={weighted_f1:.4f}")
         logging.info(f"  Fake  →  P={p[0]:.4f}  R={r[0]:.4f}  F1={f[0]:.4f}")
         logging.info(f"  Real  →  P={p[1]:.4f}  R={r[1]:.4f}  F1={f[1]:.4f}")
+        logging.info(f"  Confusion Matrix (rows=true, cols=pred):")
+        logging.info(f"    Fake: {cm[0].tolist()}")
+        logging.info(f"    Real: {cm[1].tolist()}")
         logging.info(f"\n{report}")
 
         return metrics
@@ -528,13 +600,16 @@ class MambaTrainer:
     def train(self, start_epoch: int):
         section("STEP 6 · Training Loop")
 
+        overall_peak_vram_mb = 0.0   # track across all epochs
+
         for epoch in range(start_epoch, self.epochs):
             logging.info(f"\n{'─'*55}")
             logging.info(f"  EPOCH {epoch + 1} / {self.epochs}")
             logging.info(f"{'─'*55}")
 
             t0 = time.time()
-            train_loss, train_acc = self._train_one_epoch(epoch + 1)
+            # reset_vram_peak=True resets the CUDA peak counter before each epoch
+            train_loss, train_acc = self._train_one_epoch(epoch + 1, reset_vram_peak=True)
             elapsed = time.time() - t0
 
             logging.info(f"\n  Epoch {epoch+1} finished in {elapsed/60:.1f} min")
@@ -543,29 +618,46 @@ class MambaTrainer:
 
             val_metrics = self._evaluate_val(self.val_loader, split_name="val")
 
+            # ── Capture peak VRAM for this epoch (train + val combined) ────
+            epoch_peak_vram_mb = 0.0
+            if self.device == "cuda":
+                epoch_peak_vram_mb = round(
+                    torch.cuda.max_memory_allocated(self.device) / (1024 ** 2), 1
+                )
+                overall_peak_vram_mb = max(overall_peak_vram_mb, epoch_peak_vram_mb)
+                logging.info(
+                    f"  Peak VRAM (epoch {epoch+1}) : {epoch_peak_vram_mb:.0f} MB"
+                )
+
             # Record history
-            self.history.append({
+            history_entry = {
                 "epoch"      : epoch + 1,
                 "time_min"   : round(elapsed / 60, 2),
                 "train_loss" : round(train_loss, 4),
                 "train_acc"  : round(train_acc,  2),
                 **{k: round(v, 4) if isinstance(v, float) else v
                    for k, v in val_metrics.items()},
-            })
+            }
+            if self.device == "cuda":
+                history_entry["train_peak_vram_mb"] = epoch_peak_vram_mb
+            self.history.append(history_entry)
 
             # ── MLflow: per-epoch train + val metrics ─────────
             if mlflow.active_run():
-                mlflow.log_metrics(
-                    {
-                        "train/loss"   : round(train_loss, 4),
-                        "train/acc"    : round(train_acc,  2),
-                        "val/macro_f1" : round(val_metrics["macro_f1"], 4),
-                        "val/auc_roc"  : round(val_metrics["auc_roc"],  4),
-                        "val/fake_f1"  : round(val_metrics["fake_f1"],  4),
-                        "val/real_f1"  : round(val_metrics["real_f1"],  4),
-                    },
-                    step=epoch + 1,
-                )
+                epoch_metrics = {
+                    "train/loss"   : round(train_loss, 4),
+                    "train/acc"    : round(train_acc,  2),
+                    "val/macro_f1" : round(val_metrics["macro_f1"], 4),
+                    "val/auc_roc"  : round(val_metrics["auc_roc"],  4),
+                    "val/fake_f1"  : round(val_metrics["fake_f1"],  4),
+                    "val/real_f1"  : round(val_metrics["real_f1"],  4),
+                    "val/mcc"      : round(val_metrics["mcc"], 4),
+                    "val/pr_auc"   : round(val_metrics["pr_auc"], 4),
+                    "val/ece"      : round(val_metrics["ece"], 4),
+                }
+                if self.device == "cuda":
+                    epoch_metrics["train/peak_vram_mb"] = epoch_peak_vram_mb
+                mlflow.log_metrics(epoch_metrics, step=epoch + 1)
 
             # Save best model if val Macro-F1 improved
             if val_metrics["macro_f1"] > self.best_f1:
@@ -576,7 +668,14 @@ class MambaTrainer:
                 logging.info(f"  No improvement. Best = {self.best_f1:.4f}")
 
             # Save checkpoint (every epoch, keep latest 2)
-            self._save_checkpoint(epoch)
+            self._save_checkpoint(epoch + 1)
+
+        # ── Log overall peak training VRAM once at end of training ──────
+        if self.device == "cuda" and mlflow.active_run():
+            mlflow.log_metric("train/overall_peak_vram_mb", overall_peak_vram_mb)
+            logging.info(
+                f"  Overall peak training VRAM : {overall_peak_vram_mb:.0f} MB"
+            )
 
     # ──────────────────────────────────────────────────────────
     # PUBLIC: run full Mamba training pipeline
@@ -643,7 +742,7 @@ class MambaTrainer:
 
             # ── Build training config snapshot for the evaluator ──
             training_config = {
-                "model"          : "BanglaMamba-43M",
+                "model"          : "BanglaMamba",
                 "d_model"        : self.d_model,
                 "n_layer"        : self.n_layer,
                 "vocab_size"     : self.vocab_size,

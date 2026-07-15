@@ -11,8 +11,8 @@ class DataDownloadConfig(BaseModel):
     cleaned_dataset_path: Path = BASE_DIR / "Artifacts" / "data.csv"
 
 class OfflineTokenizeConfig(BaseModel):
-    cache_dir: Path = BASE_DIR / "Artifacts" / "tokenized_cache_bert"
-    max_length: int = 768  #for bangla-bert keep 512 for ssm 512, 768, 1024 etc.
+    cache_dir: Path = BASE_DIR / "Artifacts" / "tokenized_cache_1024"
+    max_length: int = 1024  #for bangla-bert keep 512 for ssm 512, 768, 1024 etc.
     class_weight_path: Path = BASE_DIR / "Artifacts" / "class_weights.npy"
     short_test_subset_path: Path = BASE_DIR / "Artifacts" / "short_test_subset.csv"
     long_test_subset_path: Path = BASE_DIR / "Artifacts" / "long_test_subset.csv"
@@ -20,7 +20,7 @@ class OfflineTokenizeConfig(BaseModel):
 
 class BertFineTuneConfig(BaseModel):
     """File-system paths produced / consumed by BanglaBERT fine-tuning."""
-    bert_cache_dir:    Path = BASE_DIR / "Artifacts" / "tokenized_cache_bert"
+    bert_cache_dir:    Path = BASE_DIR / "Artifacts" / "tokenized_cache_512"
     checkpoint_dir:    Path = BASE_DIR / "Artifacts" / "checkpoints" / "banglabert"
     best_model_dir:    Path = BASE_DIR / "Artifacts" / "best_model" / "banglabert"
     results_file:      Path = BASE_DIR / "Artifacts" / "logs" / "banglabert_results.json"
@@ -35,21 +35,23 @@ class BertEvaluateConfig(BaseModel):
     short_test_subset: Path = BASE_DIR / "Artifacts" / "short_test_subset.csv"
     long_test_subset:  Path = BASE_DIR / "Artifacts" / "long_test_subset.csv"
 
-
+MAMBA_MAX_LENGTH = 1024
+PARAMETER_SIZE = 5  # if you change paramter size then need to update d_model and n_layer in params.py 
+MAMBA_NAME = f"mamba_{PARAMETER_SIZE}_{MAMBA_MAX_LENGTH}"
 class MambaTrainConfig(BaseModel):
     """File-system paths produced / consumed by the Bangla-Mamba training."""
-    cache_dir:         Path = BASE_DIR / "Artifacts" / "tokenized_cache_mamba_768"
-    checkpoint_dir:    Path = BASE_DIR / "Artifacts" / "checkpoints" / "mamba_768"
-    best_model_dir:    Path = BASE_DIR / "Artifacts" / "best_model" / "mamba_768"
-    results_file:      Path = BASE_DIR / "Artifacts" / "logs" / "mamba_768_results.json"
+    cache_dir:         Path = BASE_DIR / "Artifacts" / f"tokenized_cache_{MAMBA_MAX_LENGTH}"
+    checkpoint_dir:    Path = BASE_DIR / "Artifacts" / "checkpoints" / MAMBA_NAME
+    best_model_dir:    Path = BASE_DIR / "Artifacts" / "best_model" / MAMBA_NAME
+    results_file:      Path = BASE_DIR / "Artifacts" / "logs" / f"{MAMBA_NAME}_results.json"
     short_test_subset: Path = BASE_DIR / "Artifacts" / "short_test_subset.csv"
     long_test_subset:  Path = BASE_DIR / "Artifacts" / "long_test_subset.csv"
 
 
 class MambaEvaluateConfig(BaseModel):
     """File-system paths consumed / produced by the Bangla-Mamba evaluation step."""
-    best_model_dir:    Path = BASE_DIR / "Artifacts" / "best_model" / "mamba_768"
-    results_file:      Path = BASE_DIR / "Artifacts" / "logs" / "mamba_768_results.json"
+    best_model_dir:    Path = BASE_DIR / "Artifacts" / "best_model" / MAMBA_NAME
+    results_file:      Path = BASE_DIR / "Artifacts" / "logs" / f"{MAMBA_NAME}_results.json"
     short_test_subset: Path = BASE_DIR / "Artifacts" / "short_test_subset.csv"
     long_test_subset:  Path = BASE_DIR / "Artifacts" / "long_test_subset.csv"
 
@@ -76,7 +78,7 @@ class MambaMLflowConfig(BaseModel):
     """
     tracking_uri:    str  = "https://dagshub.com/Khalidi-Siam/Bangla-Fake-News-Detection.mlflow"
     experiment_name: str  = "Bangla-Mamba-Fake-News"
-    run_name:        str  = "mamba_train"
+    run_name:        str  = MAMBA_NAME
     log_model:       bool = True   # set False to skip uploading the model weights
 
 

@@ -3,6 +3,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from .config import MAMBA_MAX_LENGTH
 
 
 # ─────────────────────────────────────────────────────────────
@@ -61,10 +62,10 @@ class MambaTrainParams(BaseModel):
 
     # ── Model ──────────────────────────────────────────────────
     vocab_size: int         = 32000   # banglabert vocab — confirmed in preprocessing
-    d_model: int            = 512
-    n_layer: int            = 16
+    d_model: int            = 128
+    n_layer: int            = 6
     num_labels: int         = 2
-    max_length: int         = 1024     # Mamba context window (vs BERT 512)
+    max_length: int         = MAMBA_MAX_LENGTH     # Mamba context window (vs BERT 512)
 
     # ── Training ───────────────────────────────────────────────
     epochs: int             = 5
